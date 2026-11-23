@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 
 from .core import VERSION, data_dir, dpapi_unprotect
+from .textfmt import render
 
 PORT = int(os.environ.get("RAM_AI_PORT", "8765"))
 BASE = f"http://127.0.0.1:{PORT}/api"
@@ -32,8 +33,25 @@ for s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+def _enable_vt() -> bool:
+    """Windows consoles (classic cmd included) show colours/bold only after virtual-terminal mode is switched on."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if not k.GetConsoleMode(h, ctypes.byref(mode)):
+            return False
+        return bool(mode.value & 4 or k.SetConsoleMode(h, mode.value | 4))   # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        return False
+
+
 C = {"dim": "\033[2m", "b": "\033[1m", "g": "\033[32m", "r": "\033[31m", "y": "\033[33m", "c": "\033[36m", "m": "\033[35m", "x": "\033[0m"}
-if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
+if os.environ.get("NO_COLOR") or not sys.stdout.isatty() or not _enable_vt():
     C = {k: "" for k in C}
 
 
@@ -151,7 +169,7 @@ def follow(h, tid: str) -> int:
             print()
             if r["state"] == "Completed":
                 say("◆ RAM AI", "b")
-                say(r.get("result") or "")
+                print(render(r.get("result") or "", color=bool(C["b"])), flush=True)
                 return 0
             say(f"{r['state']}: {r.get('error') or ''}", "r")
             return 1
