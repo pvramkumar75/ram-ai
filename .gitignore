@@ -1,0 +1,10 @@
+.venv/
+dist/
+bin/
+__pycache__/
+*.pyc
+.pytest_cache/
+install_log.txt
+BUILD_STATUS.md
+.claude/
+*.log

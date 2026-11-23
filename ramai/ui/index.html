@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RAM AI</title>
+<link rel="stylesheet" href="style.css?v=5">
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo">◆</span> RAM AI</div>
+  <select id="device" title="Which computer the agent works on"></select>
+  <span id="devstate" class="pill">…</span>
+  <select id="llm" title="Switch the AI model"></select>
+  <span class="spacer"></span>
+  <button id="stop" class="danger" title="Emergency stop (Ctrl+Alt+Q)">■ Stop</button>
+  <nav>
+    <button id="tab-main" class="tab active">Agent</button>
+    <button id="tab-sched" class="tab">Schedules</button>
+    <button id="tab-hist" class="tab">History</button>
+    <button id="tab-set" class="tab">Settings</button>
+  </nav>
+</header>
+
+<main id="view-main" class="split">
+  <!-- LEFT: what the agent is doing on the computer -->
+  <section id="screen-pane">
+    <div class="pane-bar">
+      <span id="live-dot" class="dot idle"></span>
+      <span id="live-status">Idle</span>
+      <span id="win-chip" class="chip" title="Window in front">—</span>
+      <span class="spacer"></span>
+      <select id="view-mode" title="What to show"><option value="agent" selected>Agent's window</option><option value="screen">Full screen</option></select>
+      <label class="tog"><input type="checkbox" id="live-on" checked> Live</label>
+      <select id="fps" title="Refresh speed"><option value="400">Fast</option><option value="900" selected>Normal</option><option value="2500">Battery saver</option></select>
+    </div>
+    <div id="screen-wrap">
+      <img id="screen" alt="">
+      <div id="cursor" class="hidden"></div>
+      <div id="ripples"></div>
+      <div id="action-cap" class="hidden"></div>
+      <div id="screen-empty">Live view is starting…</div>
+    </div>
+    <div id="winlog" title="Recent window changes"></div>
+  </section>
+
+  <!-- RIGHT: what the agent is thinking, steps, approvals, chat -->
+  <section id="work-pane">
+    <div id="timeline">
+      <div id="ap-misc"></div>
+      <div id="tasks-feed"></div>
+      <div id="empty-hint" class="hint">
+        <div class="hint-logo">◆</div>
+        <div class="hint-title">What should I do on this PC?</div>
+        <div class="hint-sub">I work in your apps — Outlook, WhatsApp, Excel, files — and show every step. Anything that sends, deletes or overwrites waits for your OK.</div>
+        <div class="hint-row" data-q="Check all mails received today and give me a summary of each body with sender and receiver names">📬 Summarise today's mail</div>
+        <div class="hint-row" data-q="Send a WhatsApp message to Ravi: The meeting is moved to 11 AM">💬 WhatsApp a colleague a quick message</div>
+        <div class="hint-row" data-q="Find the latest email about price quotations and summarise it">📧 Summarise the latest quotation email</div>
+        <div class="hint-row" data-q="List the files on my Desktop. Authorization granted.">🗂️ List the files on my Desktop</div>
+      </div>
+    </div>
+    <form id="form">
+      <textarea id="instr" rows="2" placeholder="Ask RAM AI to do something…  (Enter to send, Shift+Enter for a new line)"></textarea>
+      <div class="form-row">
+        <label class="tog" title="Every approval needed during THIS task is granted automatically (logged in History). The Stop button still works."><input type="checkbox" id="preapp"> Pre-approve</label>
+        <span class="muted small">Say “authorization granted” to lift folder limits for a task</span>
+        <span class="spacer"></span>
+        <button type="submit" id="send">Send ↵</button>
+      </div>
+    </form>
+  </section>
+</main>
+
+<main id="view-sched" class="hidden"><div class="col wide">
+  <section class="sched-new">
+    <h3>New schedule</h3>
+    <p class="muted">Tip: you can also just tell the agent, e.g. “Every weekday at 9:00, open ChatGPT, ask for today's copper market news, format it neatly and email it to my manager”.</p>
+    <div class="row"><input id="sc-title" placeholder="Name (e.g. Daily market update to my manager)"></div>
+    <textarea id="sc-ins" rows="3" placeholder="What should it do each time? Be complete: what to open/fetch, how to format, whom to send it to."></textarea>
+    <div class="row sc-when">
+      <select id="sc-kind"><option value="daily">Every day</option><option value="weekdays">Weekdays (Mon–Fri)</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="once">Once</option><option value="interval">Every N minutes</option></select>
+      <input id="sc-time" type="time" value="09:00">
+      <input id="sc-date" type="date" class="hidden">
+      <span id="sc-days" class="hidden"></span>
+      <input id="sc-dom" type="number" min="1" max="31" value="1" class="hidden" title="Day of month">
+      <input id="sc-every" type="number" min="15" step="15" value="60" class="hidden" title="Minutes">
+    </div>
+    <div class="row"><input id="sc-allowed" placeholder="May send WITHOUT asking to (emails / WhatsApp names, comma-separated) — leave empty to be asked each time"></div>
+    <div class="row"><button id="sc-add">Create schedule</button><span class="muted small">RAM AI must be running and the PC unlocked at that time.</span>
+      <label class="inline"><input type="checkbox" id="sc-auto"> Start RAM AI with Windows</label></div>
+    <div id="sc-msg" class="msg"></div>
+  </section>
+  <h3>Scheduled tasks</h3>
+  <div id="sc-list"></div>
+</div></main>
+
+<main id="view-hist" class="hidden"><div class="col wide"><h3>Task history</h3><div id="tasks"></div>
+  <h3>Audit log</h3><pre id="audit"></pre>
+  <button id="clearhist" class="danger">Clear history</button> <button id="export">Export data</button></div></main>
+
+<main id="view-set" class="hidden"><div class="col wide" id="settings"></div></main>
+
+<div id="wizard" class="modal hidden"><div class="card">
+  <h2>Welcome to RAM AI</h2>
+  <p>RAM AI runs only on this PC. It will never send, delete, overwrite or pay without showing you the exact action and asking you first. Screenshots go to a cloud vision provider <b>only</b> if you enable and consent to it later in Settings.</p>
+  <label>Your name (how RAM AI should address you)<input id="w-user" autocomplete="name" placeholder="e.g. Priya Sharma"></label>
+  <label>Name this computer<input id="w-name" list="w-names" value="Office PC"><datalist id="w-names"><option>Office PC</option><option>Personal PC</option><option>Laptop</option></datalist></label>
+  <label>AI provider<select id="w-prov"><option value="deepseek">DeepSeek (cloud)</option><option value="openai">OpenAI (GPT, GPT Luna)</option><option value="sarvam">Sarvam AI (India)</option><option value="local">Local model (Ollama / LM Studio / llama.cpp)</option></select></label>
+  <div id="w-ds"><label id="w-keylbl">DeepSeek API key<input id="w-key" type="password" autocomplete="off" placeholder="paste your API key"></label>
+  <p class="muted">Stored encrypted with Windows DPAPI for your Windows user. It is never shown again or written to logs.</p></div>
+  <div id="w-lo" class="hidden"><label>Local server URL (OpenAI-compatible)<input id="w-lurl" value="http://localhost:11434/v1"></label>
+  <label>Model name (e.g. qwen2.5:14b-instruct) — must support tool calling<input id="w-lmodel" placeholder="model name as shown by your server"></label>
+  <p class="muted">Everything stays on this PC. Start your local server first.</p></div>
+  <div id="w-msg" class="msg"></div>
+  <button id="w-go">Save &amp; test connection</button>
+</div></div>
+
+<div id="toast"></div>
+<script src="app.js?v=5"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+pandas
+openpyxl
+xlsxwriter
+python-docx
+python-pptx
+matplotlib
+numpy
+requests
+beautifulsoup4
+pypdf
