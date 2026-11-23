@@ -35,9 +35,10 @@
     Expand-Archive $zip -DestinationPath $tmp -Force
     $src = Join-Path $tmp 'RAM_AI'
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    $full = [IO.Path]::GetFullPath($Dir).TrimEnd('\') + '\'
     Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match '-m ramai' -and $_.CommandLine -notmatch 'ramai\.cli' } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }   # stop a running copy before updating
+        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($full, [StringComparison]::OrdinalIgnoreCase) -and $_.CommandLine -match '-m ramai(\s|$)' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }   # stop only the copy being updated (other installs keep running)
     robocopy $src $Dir /E /NFL /NDL /NJH /NJS /NP /XD .venv /XF install_log.txt | Out-Null
     Get-ChildItem -LiteralPath $Dir -Recurse -File | Unblock-File
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -46,8 +47,8 @@
     # 4. run setup (works even where company policy disables .ps1 scripts)
     Push-Location $Dir
     try {
-        $args2 = @()
-        if ($env:RAMAI_UNATTENDED) { $args2 += '-Unattended', '-NoShortcuts', '-NoLaunch' }
-        & ([scriptblock]::Create((Get-Content -Raw -LiteralPath (Join-Path $Dir 'Install_RAM_AI.ps1')))) @args2
+        $opts = @{}   # hashtable splat: switches must be passed by name (an array would pass them as plain strings)
+        if ($env:RAMAI_UNATTENDED) { $opts = @{ Unattended = $true; NoShortcuts = $true; NoLaunch = $true } }
+        & ([scriptblock]::Create((Get-Content -Raw -LiteralPath (Join-Path $Dir 'Install_RAM_AI.ps1')))) @opts
     } finally { Pop-Location }
 }
