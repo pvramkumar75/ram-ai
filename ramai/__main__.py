@@ -10,7 +10,28 @@ import threading
 import time
 import webbrowser
 
-import uvicorn
+
+def _console_fallback() -> None:
+    """Started from a shortcut/autostart (pythonw) there is no console: sys.stdout/stderr are None and libraries that
+    print or check isatty() crash at start. Send that output to %APPDATA%\\RAM_AI\\ramai.log instead (kept small)."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    from .core import data_dir
+
+    log = data_dir() / "ramai.log"
+    try:
+        if log.exists() and log.stat().st_size > 2_000_000:
+            log.replace(log.with_suffix(".log.old"))
+        f = open(log, "a", encoding="utf-8", buffering=1, errors="replace")
+    except OSError:
+        f = open(os.devnull, "w")
+    sys.stdout = sys.stdout or f
+    sys.stderr = sys.stderr or f
+
+
+_console_fallback()
+
+import uvicorn  # noqa: E402  (after the console fallback: uvicorn's logging needs a real stdout)
 
 from .app import App, start_hotkey
 from .server import create_api
