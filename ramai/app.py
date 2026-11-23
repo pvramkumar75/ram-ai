@@ -12,7 +12,7 @@ from .core import DB, SecretStore, Settings, data_dir
 from .engine import ApprovalManager, Executor, Orchestrator, register_system
 from .policy import Policy
 from .providers import DeepSeek, Vision
-from .tools import apps, chatai, code, computer, docs, files, outlook, outlook_tools, schedule_tools, skills, web, whatsapp
+from .tools import apps, chatai, code, computer, docs, files, outlook, outlook_tools, schedule_tools, scroll, skills, web, whatsapp
 from .tools.base import Registry
 from . import remote
 
@@ -127,6 +127,7 @@ class App:
         apps.register(self.registry)
         apps.register_ocr(self.registry)
         apps.register_copy(self.registry)
+        scroll.register(self.registry)
         schedule_tools.register(self.registry)
         code.register(self.registry)
         if indicator:

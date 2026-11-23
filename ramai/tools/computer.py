@@ -181,7 +181,7 @@ class HotkeyArgs(Args):
 
 
 class ScrollArgs(Args):
-    amount: int = Field(ge=-50, le=50, description="Positive=up/right, negative=down/left")
+    amount: int = Field(ge=-30, le=30, description="Mouse-wheel notches (1 notch = about 3 lines). Positive=up/right, negative=down/left")
     horizontal: bool = False
 
 
@@ -326,11 +326,12 @@ def t_hotkey(a: HotkeyArgs, ctx):
 
 
 def t_scroll(a: ScrollArgs, ctx):
-    import pyautogui
+    from .scroll import wheel
 
     _stop_check(ctx)
-    (pyautogui.hscroll if a.horizontal else pyautogui.scroll)(a.amount)
-    return {"scrolled": a.amount, "horizontal": a.horizontal}
+    wheel(a.amount, horizontal=a.horizontal, stop=ctx.stopped)   # real wheel notches (pyautogui sent 1/120 of a notch per unit)
+    return {"scrolled_notches": a.amount, "horizontal": a.horizontal,
+            "tip": "To look for something, use scroll_to_text instead of repeated scroll + screenshot."}
 
 
 def t_wait(a: WaitArgs, ctx):

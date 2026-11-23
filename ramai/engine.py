@@ -321,6 +321,15 @@ APP PLAYBOOK (fast, reliable — use these instead of screenshots/clicking):
   report the error - never press Enter or click Send in WhatsApp yourself (those are sends and need approval anyway).
   If it says AMBIGUOUS, ask_user which one (title, last activity, preview) and call again with choice=<number>.
 - If the user says 'message X' without saying email or WhatsApp, ask_user which channel unless it is obvious.
+- FINDING A POINT ON SCREEN (scroll like a person): when the user wants you to go to / show / find something inside an open app -
+  an old WhatsApp message or chat, a mail lower in Outlook's list, a heading or phrase in Word, a section of a PDF or web page,
+  a row in Excel - call scroll_to_text(text=<words as they appear on screen>, direction, pane) ONCE. It rolls the real mouse wheel
+  at a natural pace, reads the pane after every few notches and stops as soon as the text is visible (or at the top/bottom).
+  direction: 'up' = older chat messages / earlier in a document; 'down' = later text / older mail in Outlook's list.
+  pane: WhatsApp left = chat list, right = open chat; Outlook center = message list, right = reading pane; documents/web: auto.
+  Use click=true only to open the found chat/mail. If not found, retry with shorter or different words, or the other direction.
+  Never loop scroll + screenshot yourself. For READING mail/WhatsApp content prefer the data tools above (faster, complete);
+  scroll_to_text is for getting there on screen, or for apps with no data tool.
 - Files/folders: list_folder(path); create_folder; move_files(moves=[...]) to organise many files in ONE call.
 
 OUTLOOK EXPERTISE (desktop Outlook on Windows; you are an Outlook power user):
