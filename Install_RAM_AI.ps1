@@ -81,7 +81,8 @@ try {
     Step "Adding the 'ramai' command"
     $bin = Join-Path $Root 'bin'
     New-Item -ItemType Directory -Force -Path $bin | Out-Null
-    "@echo off`r`n`"%~dp0..\.venv\Scripts\python.exe`" -m ramai.cli %*`r`n" | Set-Content -Encoding ASCII (Join-Path $bin 'ramai.cmd')
+    # PYTHONPATH points at the install folder so `ramai` works from any current folder (setlocal keeps it out of the user's shell)
+    "@echo off`r`nsetlocal`r`nset `"PYTHONPATH=%~dp0..`"`r`n`"%~dp0..\.venv\Scripts\python.exe`" -m ramai.cli %*`r`n" | Set-Content -Encoding ASCII (Join-Path $bin 'ramai.cmd')
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if (-not (($userPath -split ';') -contains $bin)) {
         [Environment]::SetEnvironmentVariable('Path', (($userPath.TrimEnd(';') + ';' + $bin).TrimStart(';')), 'User')

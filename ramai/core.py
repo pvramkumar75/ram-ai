@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "RAM AI"
-VERSION = "0.2.4"
+VERSION = "0.2.5"
 
 
 def data_dir() -> Path:
