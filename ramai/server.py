@@ -336,10 +336,23 @@ def create_api(app: App, token: str | None = None, port: int = 8765) -> FastAPI:
     async def teach_stop():
         import asyncio as _asyncio
 
-        from .teach import public_steps
+        await _asyncio.to_thread(app.teach.stop)
+        return {"steps": app.teach.review, "stopped_reason": app.teach.stopped_reason}
 
-        steps = await _asyncio.to_thread(app.teach.stop)
-        return {"steps": public_steps(steps), "stopped_reason": app.teach.stopped_reason}
+    @api.get("/api/teach/review")
+    async def teach_review():
+        """The finished recording waiting for review (so a page refresh does not lose it)."""
+        return {"steps": app.teach.review}
+
+    @api.post("/api/teach/restore")
+    async def teach_restore(body: dict = Body(...)):
+        """Put a reviewed recording back (e.g. after RAM AI restarted). Text lines only."""
+        from .teach import clean_review
+
+        if app.teach.recording:
+            raise HTTPException(409, "Stop the current recording first.")
+        app.teach.steps, app.teach.review = [], clean_review(body.get("steps"))
+        return {"steps": len(app.teach.review)}
 
     @api.post("/api/teach/discard")
     async def teach_discard():
@@ -349,19 +362,21 @@ def create_api(app: App, token: str | None = None, port: int = 8765) -> FastAPI:
     @api.post("/api/teach/draft")
     async def teach_draft(body: dict = Body(...)):
         """Send ONLY the steps the user kept to the AI, which writes the skill for the user to check."""
-        from .teach import clean_draft, draft_prompt, slug, to_text
+        from .teach import clean_draft, draft_prompt, review_text, slug
 
         title = str(body.get("title") or "").strip()[:80]
         if len(title) < 3:
             raise HTTPException(400, "Give the task a name first (e.g. 'MB51 stock report').")
-        steps = app.teach.steps
+        steps = app.teach.review
+        if not steps:
+            raise HTTPException(409, "The recording is no longer in RAM AI (it was restarted). Press Teach and record the task again.")
         keep = {int(i) for i in body.get("keep") or [] if str(i).isdigit() and int(i) < len(steps)}
         if not keep:
             raise HTTPException(400, "No steps kept. Record the task again, or tick the steps to use.")
         desc = str(body.get("description") or "").strip()[:600]
-        text = to_text(steps, keep)
+        text = review_text(steps, keep)
         try:
-            msg = await app.llm.chat(draft_prompt(title, desc, text), temperature=0.2)
+            msg = await app.deepseek.chat(draft_prompt(title, desc, text), temperature=0.2)
         except ProviderError as e:
             raise HTTPException(502, str(e))
         content = clean_draft(msg.get("content") or "")
@@ -386,7 +401,7 @@ def create_api(app: App, token: str | None = None, port: int = 8765) -> FastAPI:
         rec = f"\n\n## Recorded demonstration (for reference)\n```\n{recording}\n```\n" if recording else "\n"
         p.write_text(f"---\nname: {name}\ndescription: {desc}\ntaught: yes\n---\n{content}{rec}", encoding="utf-8")
         app.db.audit(None, app.device_name, "skill_saved", None, {"name": name, "taught": True})
-        app.teach.steps = []
+        app.teach.steps, app.teach.review = [], []
         return {"saved": name, "path": str(p)}
 
     @api.post("/api/voice/listen")

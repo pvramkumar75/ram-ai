@@ -179,6 +179,31 @@ def to_text(steps: list[dict], keep: set[int] | None = None) -> str:
     return "\n".join(out)
 
 
+def review_text(review: list[dict], keep: set[int] | None = None) -> str:
+    """Same as to_text, from the reviewed lines (what the user saw and kept)."""
+    out, cur, n = [], None, 0
+    for i, s in enumerate(review):
+        if keep is not None and i not in keep:
+            continue
+        w = str(s.get("window") or "unknown window")
+        if w != cur:
+            out.append(f"In window: {w}")
+            cur = w
+        n += 1
+        out.append(f"  {n}. {s.get('line', '')}")
+    return "\n".join(out)
+
+
+def clean_review(items) -> list[dict]:
+    """Validate steps handed back (e.g. after a restart): plain text only, capped."""
+    out = []
+    for s in (items or [])[:MAX_STEPS]:
+        if isinstance(s, dict) and isinstance(s.get("line"), str) and s["line"].strip():
+            out.append({"id": len(out), "window": str(s.get("window") or "")[:200], "line": s["line"][:500],
+                        "typed": bool(s.get("typed")), "masked": bool(s.get("masked"))})
+    return out
+
+
 def slug(title: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")[:40].strip("_")
     return s if len(s) >= 3 else (s + "_skill")[:40]
@@ -279,6 +304,7 @@ class Recorder:
         self.recording = False
         self.started = 0.0
         self.steps: list[dict] = []                # last finished recording (kept in memory until saved/discarded)
+        self.review: list[dict] = []               # its readable lines, shown for review and used to write the skill
         self.stopped_reason = ""
         self._b: Builder | None = None
         self._q: queue.Queue = queue.Queue()
@@ -296,7 +322,7 @@ class Recorder:
         with self._lock:
             if self.recording:
                 return self.status()
-            self._b, self.steps, self.stopped_reason = Builder(), [], ""
+            self._b, self.steps, self.review, self.stopped_reason = Builder(), [], [], ""
             self._q = queue.Queue()
             self._win_cache = {}
             self.errors = []
@@ -332,18 +358,20 @@ class Recorder:
         self._dock(False)
         self._read_crops(steps)
         self.steps = steps
+        self.review = public_steps(steps)
         return steps
 
     def discard(self) -> None:
         if self.recording:
             self.stop()
-        self.steps = []
+        self.steps, self.review = [], []
 
     def status(self) -> dict:
         b = self._b
         return {"recording": self.recording, "steps": len(b.steps) if (b and self.recording) else len(self.steps),
                 "seconds": round(time.monotonic() - self.started) if self.recording else 0, "stopped_reason": self.stopped_reason,
-                "last": describe(b.steps[-1]) if (b and self.recording and b.steps) else ""}
+                "last": describe(b.steps[-1]) if (b and self.recording and b.steps) else "",
+                "pending": 0 if self.recording else len(self.review)}
 
     def _dock(self, on: bool) -> None:
         d = getattr(self.app, "dock", None)

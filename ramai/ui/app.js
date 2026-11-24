@@ -429,7 +429,13 @@ $("#tm-save").onclick = async () => {
     closeTeach(); toast(`Skill “${r.saved}” saved. Ask for this task any time and RAM AI follows your steps.`, 7000);
   } catch (e) { $("#tm-msg").textContent = e.message; }
 };
-api("/teach").then(st => { teachUI(st); if (st.recording) teach.timer = setInterval(pollTeach, 1000); }).catch(() => { });
+api("/teach").then(async st => {
+  teachUI(st);
+  if (st.recording) teach.timer = setInterval(pollTeach, 1000);
+  else if (st.pending) {   // a finished recording is still waiting for review (page was refreshed / RAM AI restarted)
+    try { teach.steps = (await api("/teach/review")).steps || []; if (teach.steps.length) openTeachModal(); } catch { }
+  }
+}).catch(() => { });
 
 // ---------------------------------------------------------------- voice input: HOLD 🎤 (or Ctrl+M) while you speak, let go to send
 // Edge speech recognition (no Windows setting needed); Windows speech as a fallback.

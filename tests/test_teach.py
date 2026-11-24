@@ -113,3 +113,47 @@ def test_input_hooks_really_install():
         assert tk.hooked
     finally:
         tk.disarm()
+
+
+def test_teach_api_draft_and_save(app, tmp_path, monkeypatch):
+    """The real endpoints: kept steps go to the selected AI model, the skill is saved with taught: yes."""
+    from fastapi.testclient import TestClient
+
+    from ramai.server import create_api
+    from ramai.tools import skills
+
+    b = Builder()
+    b.click(0, 1, 1, SAP, {"name": "select PO No. -40", "type": "radio button"}, (0.2, 0.45))
+    b.char(1, "A", SAP, {"name": "please write your comments", "type": "edit"})
+    b.char(1.1, "x", SAP, {"name": "secret", "password": True})
+    app.teach.steps, app.teach.review = b.steps, public_steps(b.steps)
+    seen = {}
+
+    async def fake_chat(messages, tools=None, temperature=0.2):
+        seen["prompt"] = messages[1]["content"]
+        return {"content": "```markdown\n## When to use\nApprove a PO in ERP.\n## Steps\n1. Click {po}\n```"}
+
+    monkeypatch.setattr(app.deepseek, "chat", fake_chat)
+    monkeypatch.setattr(skills, "user_dir", lambda: tmp_path)
+    h = {"X-RAM-Token": "T"}
+    with TestClient(create_api(app, "T", 8765), base_url="http://127.0.0.1:8765") as c:
+        r = c.post("/api/teach/draft", headers=h, json={"title": "ERP PO approval", "description": "PO number changes", "keep": [0, 1]})
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["name"] == "erp_po_approval" and d["content"].startswith("## When to use")
+        assert "select PO No. -40" in seen["prompt"] and "secret" not in seen["prompt"]   # unticked step not sent
+        r = c.post("/api/teach/save", headers=h, json={**d, "description": "Approve POs in ERP"})
+        assert r.status_code == 200, r.text
+        txt = (tmp_path / "erp_po_approval.md").read_text(encoding="utf-8")
+        assert "taught: yes" in txt and "Recorded demonstration" in txt
+        assert c.post("/api/teach/save", headers=h, json={**d, "description": "again"}).status_code == 409
+
+        # a reviewed recording can be put back after a restart and drafted again
+        lines = [{"window": "ERP", "line": 'Click the link "APR-VP"'}, {"line": ""}, "junk", {"window": "ERP", "line": "Press Enter"}]
+        assert c.post("/api/teach/restore", headers=h, json={"steps": lines}).json() == {"steps": 2}
+        assert c.get("/api/teach", headers=h).json()["pending"] == 2
+        assert c.get("/api/teach/review", headers=h).json()["steps"][1]["line"] == "Press Enter"
+        r = c.post("/api/teach/draft", headers=h, json={"title": "ERP again", "keep": [0, 1]})
+        assert r.status_code == 200 and 'In window: ERP\n  1. Click the link "APR-VP"\n  2. Press Enter' in seen["prompt"]
+        c.post("/api/teach/discard", headers=h)
+        assert c.post("/api/teach/draft", headers=h, json={"title": "ERP again", "keep": [0]}).status_code == 409
