@@ -3,6 +3,7 @@
   ramai                         open the RAM AI window (starts RAM AI if needed)
   ramai "do something"          run a task, show its steps live, approve/answer right here
   ramai run "..." [--pre-approve]
+  ramai voice [--pre-approve]   speak your task (Windows speech), then confirm and run it
   ramai status | stop | history [-n 10] | doctor | version | update
   ramai schedules [list | run ID | pause ID | resume ID | delete ID]
 """
@@ -25,7 +26,7 @@ PORT = int(os.environ.get("RAM_AI_PORT", "8765"))
 BASE = f"http://127.0.0.1:{PORT}/api"
 ROOT = Path(__file__).resolve().parents[1]
 REPO = "pvramkumar75/ram-ai"
-COMMANDS = {"run", "status", "stop", "history", "doctor", "version", "update", "schedules", "open", "help"}
+COMMANDS = {"run", "status", "stop", "history", "doctor", "version", "update", "schedules", "open", "help", "voice"}
 
 for s in (sys.stdout, sys.stderr):
     try:
@@ -193,6 +194,24 @@ def cmd_run(args) -> int:
         return 130
 
 
+def cmd_voice(args) -> int:
+    h = connect()
+    say("🎤 Listening… speak your task, then pause.", "c")
+    r = api(h, "POST", "/voice/listen", {}, timeout=40)  # exits with the reason (e.g. Windows speech switched off)
+    text = (r.get("text") or "").strip()
+    if not text:
+        say("I didn't catch anything.", "y")
+        return 1
+    say(f"Heard: {text}", "b")
+    ans = input(f"{C['b']}Run it? [Enter = yes / e = edit / n = no]: {C['x']}").strip().lower()
+    if ans in ("n", "no"):
+        return 0
+    if ans in ("e", "edit"):
+        text = input("Task: ").strip() or text
+    args.text = text
+    return cmd_run(args)
+
+
 def cmd_open(args) -> int:
     connect()
     from .__main__ import open_ui
@@ -312,6 +331,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="ramai", description="RAM AI desktop agent")
     sub = p.add_subparsers(dest="cmd")
     r = sub.add_parser("run"); r.add_argument("text", nargs="+"); r.add_argument("--pre-approve", action="store_true")
+    vo = sub.add_parser("voice"); vo.add_argument("--pre-approve", action="store_true")
     for n in ("status", "stop", "doctor", "update", "open"):
         sub.add_parser(n)
     hi = sub.add_parser("history"); hi.add_argument("-n", type=int, default=10)
@@ -320,7 +340,7 @@ def main(argv=None) -> int:
     if a.cmd == "run":
         a.text = " ".join(a.text)
     return {"run": cmd_run, "status": cmd_status, "stop": cmd_stop, "history": cmd_history, "schedules": cmd_schedules,
-            "doctor": cmd_doctor, "update": cmd_update, "open": cmd_open}[a.cmd](a)
+            "doctor": cmd_doctor, "update": cmd_update, "open": cmd_open, "voice": cmd_voice}[a.cmd](a)
 
 
 if __name__ == "__main__":

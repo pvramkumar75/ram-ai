@@ -90,7 +90,7 @@ def main() -> None:
     token = os.environ.get("RAM_AI_TEST_TOKEN") or secrets.token_urlsafe(32)  # override is for automated tests only
     api = create_api(app, token, PORT)
 
-    start_hotkey(app.orchestrator.emergency_stop)
+    start_hotkey(app.orchestrator.emergency_stop, app.takeover)
     if app.settings.get("remote", {}).get("enabled"):
         try:
             app.remote_server.start()

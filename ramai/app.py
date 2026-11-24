@@ -79,17 +79,22 @@ class Indicator:
         self.visible = False
 
 
-def start_hotkey(callback) -> threading.Thread | None:
-    """Global emergency stop: Ctrl+Alt+Q."""
+def start_hotkey(callback, takeover=None) -> threading.Thread | None:
+    """Global hotkeys: Ctrl+Alt+Q emergency stop; Ctrl+Alt+P take control / resume (pause the agent while you fix something)."""
 
     def run():
         u = ctypes.windll.user32
         if not u.RegisterHotKey(None, 1, 0x0001 | 0x0002 | 0x4000, ord("Q")):  # ALT|CTRL|NOREPEAT
             return
+        u.RegisterHotKey(None, 2, 0x0001 | 0x0002 | 0x4000, ord("P"))
         msg = wintypes.MSG()
         while u.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
             if msg.message == 0x0312:
-                callback()
+                if msg.wParam == 2:
+                    if takeover is not None:
+                        takeover.set_paused(not takeover.paused)
+                else:
+                    callback()
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
@@ -102,6 +107,16 @@ class App:
         self.settings = Settings()
         self.secrets = SecretStore()
         self.db = DB()
+        from .people import People
+
+        self.people = People(self.db)
+        from .takeover import Takeover
+
+        self.takeover = Takeover(self)
+        try:
+            self.people.bootstrap_from_audit()  # first run: learn who you already mailed / messaged through RAM AI
+        except Exception:
+            pass
         self.policy = Policy(self.settings)
         self.deepseek = DeepSeek(self.settings, self.secrets)
         self.vision = Vision(self.settings, self.secrets)

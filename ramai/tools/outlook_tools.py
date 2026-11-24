@@ -89,6 +89,74 @@ def _recips(addrs):
     return [{"emailAddress": {"address": a}} for a in addrs]
 
 
+# ------------------------------------------------------------------ short names -> the right person
+async def resolve_one(ctx, q: str) -> tuple[str | None, str]:
+    """'KVR', 'Suresh', 'Srini' -> one email address. Ties are broken by how much you mail each person."""
+    from ..people import TIE, explain, rank
+
+    ppl = ctx.app.people
+    cands = ppl.candidates(q, "mail")
+    if backend(ctx.app) == "com" and not (cands and cands[0]["score"] >= 1.0):
+        try:
+            for f in await asyncio.to_thread(oc.find_people, q, 8):
+                ppl.note(f.get("name") or "", f.get("email") or "", source="outlook")
+        except Exception:
+            pass
+        cands = ppl.candidates(q, "mail")
+    cands = [c for c in cands if c["score"] >= 0.8]
+    if not cands:
+        return None, f"'{q}': no known person matched, so Outlook resolves the name itself (Check Names)"
+    counts = {}
+    tied = [c for c in cands if c["score"] >= cands[0]["score"] - TIE]
+    if backend(ctx.app) == "com" and len(tied) > 1:
+        try:
+            counts = await asyncio.to_thread(oc.interaction_counts, tied)
+        except Exception:
+            counts = {}
+    ranked = rank(cands, counts)
+    ctx.scratch.setdefault("people_map", {})[q] = ranked[0]["key"]
+    return ranked[0]["email"], explain(q, ranked, lambda c: f"{c['name']} <{c['email']}>")
+
+
+async def resolve_names(ctx, names: list[str]) -> tuple[list[str], list[str]]:
+    out, notes = [], []
+    for raw in names:
+        q = (raw or "").strip()
+        if not q or "@" in q:
+            out.append(q)
+            continue
+        email, note = await resolve_one(ctx, q)
+        out.append(email or q)
+        if note:
+            notes.append(note)
+    return out, notes
+
+
+def _remember_sent(ctx, asked: list[str]) -> None:
+    ppl, m = ctx.app.people, ctx.scratch.get("people_map", {})
+    for q in asked:
+        q = (q or "").strip()
+        if "@" in q:
+            ppl.note(email=q, source="mail", sent="mail")
+        elif q in m:
+            ppl.note(email=m[q], source="mail", sent="mail")
+            ppl.learn(q, "mail", m[q])
+
+
+def _learn_from_messages(ctx, msgs) -> None:
+    try:
+        for m in msgs or []:
+            if not isinstance(m, dict):
+                continue
+            if m.get("from_email"):
+                ctx.app.people.note(m.get("from") or "", m["from_email"], source="mail")
+            for f in ("from", "to", "cc"):
+                if isinstance(m.get(f), str) and "@" in m[f]:
+                    ctx.app.people.note_from_line(m[f], "mail")
+    except Exception:
+        pass
+
+
 # ------------------------------------------------------------------ tools
 async def t_find_person(a: FindPersonArgs, ctx):
     if backend(ctx.app) == "com":
@@ -101,11 +169,14 @@ async def t_find_person(a: FindPersonArgs, ctx):
             for em in p.get("scoredEmailAddresses", [])[:1]:
                 res.append({"name": p.get("displayName"), "email": em.get("address"), "source": "people", "seen": 0})
         res = [r for r in res if r["email"] and all(t in (r["name"] + r["email"]).lower() for t in toks)]
-    if not res:
+    for r in res:
+        ctx.app.people.note(r.get("name") or "", r.get("email") or "", source="outlook")
+    email, note = await resolve_one(ctx, a.name)
+    if not res and not email:
         return {"candidates": [], "next": "No match. Ask the user for the full email address or another spelling."}
-    uniq = len({r["email"].lower() for r in res}) == 1
-    return {"candidates": res, "unique": uniq,
-            "next": "One match: use it." if uniq else "Several different people match: ask the user which one (ask_user) unless the user already gave the full name and exactly one matches it."}
+    return {"candidates": res, "picked": email, "why": note,
+            "next": "Use the picked address (send_email does this automatically for names and short forms). "
+                    "The approval card shows who was picked, so the user can correct it."}
 
 
 async def t_search(a: SearchArgs, ctx):
@@ -165,6 +236,8 @@ async def t_download(a: DownloadArgs, ctx):
 
 
 async def t_draft(a: DraftArgs, ctx):
+    if any("@" not in x for x in a.to + a.cc):
+        a = a.model_copy(update={"to": (await resolve_names(ctx, a.to))[0], "cc": (await resolve_names(ctx, a.cc))[0]})
     if _window_mode(ctx):
         snap = await _compose_window(a, ctx)
         return {"draft": "open in an Outlook window (not sent)", "to": snap["to"], "cc": snap["cc"], "subject": snap["subject"],
@@ -273,6 +346,17 @@ def _window_text(snap: dict, ctx) -> str:
 
 
 async def quick_send_preview(a: SendEmailArgs, ctx):
+    to, n1 = await resolve_names(ctx, a.to)
+    cc, n2 = await resolve_names(ctx, a.cc)
+    notes = n1 + n2
+    a = a.model_copy(update={"to": to, "cc": cc})
+    pv = await _quick_send_preview(a, ctx)
+    if notes:
+        pv["text"] = "Recipients: " + " | ".join(notes) + "\n\n" + pv["text"]
+    return pv
+
+
+async def _quick_send_preview(a: SendEmailArgs, ctx):
     if _window_mode(ctx):
         snap = await _compose_window(a, ctx)
         if not snap["to"].strip() and not a.reply_to_message_id:
@@ -300,11 +384,15 @@ async def t_quick_send(a: SendEmailArgs, ctx):
         if now["digest"] != ctx.approved_digest:
             raise PolicyError("The email in Outlook's window changed after you approved it. Nothing was sent; it is still open for you.")
         ctx.app.db.exec("INSERT INTO sent(key,ts) VALUES(?,strftime('%s','now'))", (key,))
-        return await asyncio.to_thread(ow.press_send, snap["hwnd"])
+        res = await asyncio.to_thread(ow.press_send, snap["hwnd"])
+        _remember_sent(ctx, a.to + a.cc)
+        return res
     did = ctx.scratch.pop("email_draft", None)
     if not did:
         raise PolicyError("No prepared draft; nothing sent")
-    return await t_send(SendArgs(draft_id=did), ctx)
+    res = await t_send(SendArgs(draft_id=did), ctx)
+    _remember_sent(ctx, a.to + a.cc)
+    return res
 
 
 class ListArgs(Args):
@@ -324,7 +412,9 @@ class ReadManyArgs(Args):
 
 async def t_list(a: ListArgs, ctx):
     if backend(ctx.app) == "com":
-        return await asyncio.to_thread(oc.list_messages, a.since, a.until, a.folders, a.unread_only, a.sender, a.limit)
+        res = await asyncio.to_thread(oc.list_messages, a.since, a.until, a.folders, a.unread_only, a.sender, a.limit)
+        _learn_from_messages(ctx, res.get("messages"))
+        return res
     start, end = oc.parse_since(a.since, a.until)
     folder = "sentitems" if a.folders == "sent" else "inbox"
     flt = f"receivedDateTime ge {start.astimezone().isoformat()}" + (f" and receivedDateTime lt {end.astimezone().isoformat()}" if end else "")
@@ -347,7 +437,9 @@ async def t_list(a: ListArgs, ctx):
 async def t_read_many(a: ReadManyArgs, ctx):
     ids = [_ol._id(i) for i in a.ids]
     if backend(ctx.app) == "com":
-        return {"messages": await asyncio.to_thread(oc.read_many, ids, a.max_chars)}
+        msgs = await asyncio.to_thread(oc.read_many, ids, a.max_chars)
+        _learn_from_messages(ctx, msgs)
+        return {"messages": msgs}
     out = []
     for i in ids:
         try:
@@ -359,10 +451,10 @@ async def t_read_many(a: ReadManyArgs, ctx):
 
 def register(reg: Registry) -> None:
     R = Risk
-    reg.register(Tool("send_email", "FASTEST way to email in ONE call: creates the draft (recipients may be NAMES with desktop Outlook), shows it for approval, sends. Use reply_to_message_id to reply.", SendEmailArgs, t_quick_send, R.HIGH, 150, preview=quick_send_preview, reversible=False))
+    reg.register(Tool("send_email", "FASTEST way to email (also called mail) in ONE call: recipients may be NAMES or SHORT FORMS (KVR, Suresh, Srini) - each is resolved to the right person (if several match equally, the one you mail most) and shown on the approval card. Creates the draft, gets approval, sends. Use reply_to_message_id to reply.", SendEmailArgs, t_quick_send, R.HIGH, 150, preview=quick_send_preview, reversible=False))
     reg.register(Tool("outlook_list_messages", "List mail by DATE (complete and current, no keywords needed): e.g. since='today'. Use for 'mails received today/yesterday/this week', unread mail, or all mail from a sender in a period.", ListArgs, t_list, R.READ, 120, untrusted=True))
     reg.register(Tool("outlook_read_many", "Read up to 25 emails in ONE call (sender, To, Cc, cleaned body). Use after outlook_list_messages/outlook_search.", ReadManyArgs, t_read_many, R.READ, 240, untrusted=True))
-    reg.register(Tool("outlook_find_person", "Find people by NAME (not full email) in contacts, recent mail and directory. If several different people match, ask the user which.", FindPersonArgs, t_find_person, R.READ, 40, untrusted=True))
+    reg.register(Tool("outlook_find_person", "Find people by NAME or SHORT FORM (initials like KVR, first name, nickname) in contacts, recent mail and directory. Returns the picked person (best match; if tied, the one you mail most) and the alternatives.", FindPersonArgs, t_find_person, R.READ, 40, untrusted=True))
     reg.register(Tool("outlook_search", "Search the mailbox. Every word must match subject/sender (or body). Works by person NAME too.", SearchArgs, t_search, R.READ, 60, untrusted=True))
     reg.register(Tool("outlook_read", "Read an email (body as text) and list its attachments.", ReadArgs, t_read, R.READ, 60, untrusted=True))
     reg.register(Tool("outlook_download_attachment", "Download an attachment into a write-enabled authorised folder (never overwrites).", DownloadArgs, t_download, R.LOW, 90, check=_check_dest))

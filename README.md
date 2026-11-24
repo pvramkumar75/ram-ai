@@ -22,6 +22,7 @@ On first start RAM AI asks for your name, a name for the computer, and an **AI k
 ramai                                   # open the app
 ramai "summarise today's unread mail"   # run a task here; approvals are asked in the terminal
 ramai run --pre-approve "..."           # approve the whole task up front
+ramai voice                             # speak a task (needs Windows "Online speech recognition" on)
 ramai status                            # is it running? which model?
 ramai history -n 10                     # recent tasks
 ramai schedules                         # list scheduled tasks (run / pause / resume / delete <id>)
@@ -34,15 +35,18 @@ Open a **new** terminal after installing so `ramai` is on your PATH.
 
 ## What it can do
 
-- **Outlook** (desktop app, else the web): find people by name, search and summarise mail, write and send email with attachments (approval first).
-- **WhatsApp** (desktop app, else WhatsApp Web): find a chat by name, asks when names are ambiguous, sends formatted messages.
+- **Outlook** ("mail"; desktop app, else the web): search and summarise mail, write and send email with attachments (approval first).
+- **WhatsApp** ("message"/"msg"; desktop app, else WhatsApp Web): find a chat, send formatted messages.
+- **Short names**: say "mail KVR" or "message Suresh" - initials, first names, nicknames and the part of an address before @ are matched to the right person. If several match, the one you interact with most is picked and shown on the approval card. Every confirmed send teaches RAM AI that short form.
+- **Voice**: click 🎤 (or Ctrl+M) and speak your task; Indian English by default, Hindi/Telugu/Tamil and more in Settings. Terminal: `ramai voice`.
+- **Take control mid-task**: just use your mouse/keyboard to fix something - RAM AI pauses, waits until you stop, looks at the screen again and carries on. Or press 🖐 Take control (Ctrl+Alt+P) and Resume when done.
 - **Scheduling**: "every weekday at 9:00 ask ChatGPT for copper prices and WhatsApp them to me". Runs while RAM AI is open; it can start with Windows.
 - **Documents**: create and edit Excel, Word and PowerPoint; Power BI guidance; read PDF/DOCX/XLSX/CSV/PPTX.
 - **Code**: PowerShell/cmd and Python in an isolated workspace; installs packages when a task needs them.
 - **Any app**: screenshots, OCR, UI Automation, mouse and keyboard, with a live view of what the agent is doing.
 - **Two PCs**: pair an office and a personal PC over pinned TLS.
 
-Emergency stop: **Ctrl+Alt+Q** or the red STOP button.
+Emergency stop: **Ctrl+Alt+Q** or the red STOP button. Take control / resume: **Ctrl+Alt+P**.
 
 ## Security in short
 

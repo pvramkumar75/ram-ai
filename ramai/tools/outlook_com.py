@@ -79,8 +79,10 @@ def find_people(name: str, limit: int = 10, budget: float = 4.0) -> list[dict]:
     found: dict[str, dict] = {}
     t0 = time.time()
 
+    from ..people import match as _short_match
+
     def add(display: str, email: str, source: str):
-        if not email or not all(t in (display + " " + email).lower() for t in toks):
+        if not email or not (all(t in (display + " " + email).lower() for t in toks) or _short_match(name, display, email)[0] >= 0.8):
             return
         k = email.lower()
         if k in found:
@@ -139,6 +141,10 @@ def find_people(name: str, limit: int = 10, budget: float = 4.0) -> list[dict]:
 # ------------------------------------------------------------------ mail
 def _like(field: str, tok: str) -> str:
     return f'"{field}" LIKE \'%{tok.replace(chr(39), chr(39) * 2)}%\''
+
+
+def _eq(field: str, val: str) -> str:
+    return f'"{field}" = \'{val.replace(chr(39), chr(39) * 2)}\''
 
 
 def _phrase(field: str, tok: str) -> str:
@@ -597,12 +603,48 @@ def _safe_summary(m, fname: str) -> dict:
             "from": "(not read yet: use outlook_read_many for sender, recipients and body)"}
 
 
+SMTP_TAG = "http://schemas.microsoft.com/mapi/proptag/0x5D01001F"  # sender SMTP address (works for Exchange senders too)
+
+
+def interaction_counts(people: list[dict], days: int = 180, budget: float = 6.0) -> dict:
+    """How much you exchange mail with each person over `days`: received from them + 2 x sent to them.
+    Uses only search filters (no protected properties) so Outlook never shows a security prompt."""
+    import datetime as dt
+
+    since = (dt.datetime.now() - dt.timedelta(days=days)).strftime("%m/%d/%Y")
+    out, t0 = {}, time.time()
+    with com() as ol:
+        ns = ol.GetNamespace("MAPI")
+        # one date filter per folder, then a simple filter per person on top (an OR of filters is ~100x slower)
+        inbox = ns.GetDefaultFolder(6).Items.Restrict(f"[ReceivedTime] >= '{since}'")
+        sent = ns.GetDefaultFolder(5).Items.Restrict(f"[SentOn] >= '{since}'")
+        for p in people[:8]:
+            if time.time() - t0 > budget:
+                break
+            em, nm = (p.get("email") or ""), (p.get("name") or "").strip()
+            n = 0
+            try:
+                if em:
+                    n += inbox.Restrict("@SQL=" + _eq(SMTP_TAG, em)).Count
+                elif len(nm) > 2:
+                    n += inbox.Restrict("@SQL=" + _eq("urn:schemas:httpmail:fromname", nm)).Count
+                if len(nm) > 2 and nm.lower() != em:
+                    n += 2 * sent.Restrict("@SQL=" + _like("urn:schemas:httpmail:displayto", nm)).Count
+            except Exception:
+                pass
+            out[p.get("key") or p.get("email")] = n
+    return out
+
+
 def _find_people_safe(name: str, limit: int) -> list[dict]:
     """Untrusted Outlook: find recent mail FROM that name inside the store, then read the From line in its window."""
     q = name.replace("'", "''")
     with com() as ol:
         ns = ol.GetNamespace("MAPI")
-        items = ns.GetDefaultFolder(6).Items.Restrict('@SQL="urn:schemas:httpmail:fromname" LIKE ' + "'%" + q + "%'")
+        lp = re.sub(r"[^\w.-]", "", name.split()[0] if name.split() else "").replace("'", "")
+        flt = ('@SQL="urn:schemas:httpmail:fromname" LIKE ' + "'%" + q + "%'"
+               + (f" OR \"urn:schemas:httpmail:fromemail\" LIKE '{lp}%' OR \"{SMTP_TAG}\" LIKE '{lp}%'" if len(lp) >= 2 else ""))
+        items = ns.GetDefaultFolder(6).Items.Restrict(flt)
         items.Sort("[ReceivedTime]", True)
         ids, m = [], items.GetFirst()
         while m is not None and len(ids) < 6:

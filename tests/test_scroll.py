@@ -12,8 +12,8 @@ def test_match_contains_case_and_punctuation():
 
 
 def test_match_tolerates_ocr_slips_but_not_unrelated_text():
-    assert match_score("Zhangyang CGND", "Zhangyang CGNO") >= 0.86
-    assert match_score("Zhangyang CGND", "HDFC Bank statement") == 0.0
+    assert match_score("Lakshmi Traders", "Lakshmi Tradors") >= 0.86
+    assert match_score("Lakshmi Traders", "HDFC Bank statement") == 0.0
 
 
 def test_numbers_must_match_exactly_and_short_words_are_whole_words():

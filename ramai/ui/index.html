@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RAM AI</title>
-<link rel="stylesheet" href="style.css?v=5">
+<link rel="stylesheet" href="style.css?v=7">
 </head>
 <body>
 <header>
@@ -13,6 +13,7 @@
   <span id="devstate" class="pill">…</span>
   <select id="llm" title="Switch the AI model"></select>
   <span class="spacer"></span>
+  <button id="takectl" class="ghost" title="Pause the agent so you can fix something on the screen yourself (Ctrl+Alt+P). It continues when you press Resume.">🖐 Take control</button>
   <button id="stop" class="danger" title="Emergency stop (Ctrl+Alt+Q)">■ Stop</button>
   <nav>
     <button id="tab-main" class="tab active">Agent</button>
@@ -59,12 +60,14 @@
         <div class="hint-row" data-q="List the files on my Desktop. Authorization granted.">🗂️ List the files on my Desktop</div>
       </div>
     </div>
+    <div id="tkbar" class="tkbar" hidden><span class="tki">🖐</span><span id="tkmsg"></span><span class="spacer"></span><button id="tkresume">Resume now</button></div>
     <form id="form">
       <textarea id="instr" rows="2" placeholder="Ask RAM AI to do something…  (Enter to send, Shift+Enter for a new line)"></textarea>
       <div class="form-row">
         <label class="tog" title="Every approval needed during THIS task is granted automatically (logged in History). The Stop button still works."><input type="checkbox" id="preapp"> Pre-approve</label>
         <span class="muted small">Say “authorization granted” to lift folder limits for a task</span>
         <span class="spacer"></span>
+        <button type="button" id="mic" title="Speak your task (Ctrl+M). Click again to stop.">🎤</button>
         <button type="submit" id="send">Send ↵</button>
       </div>
     </form>
@@ -116,6 +119,6 @@
 </div></div>
 
 <div id="toast"></div>
-<script src="app.js?v=5"></script>
+<script src="app.js?v=7"></script>
 </body>
 </html>

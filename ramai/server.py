@@ -306,6 +306,31 @@ def create_api(app: App, token: str | None = None, port: int = 8765) -> FastAPI:
 
         return Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "RAM AI.cmd"
 
+    @api.get("/api/takeover")
+    async def takeover_get():
+        tk = app.takeover
+        return {"paused": tk.paused, "waiting": tk.waiting}
+
+    @api.post("/api/takeover")
+    async def takeover_set(body: dict = Body(...)):
+        """on=true: 'Take control' - the agent pauses before its next screen action until on=false (Resume)."""
+        app.takeover.set_paused(bool(body.get("on")))
+        return {"paused": app.takeover.paused}
+
+    @api.post("/api/voice/listen")
+    async def voice_listen(body: dict = Body(default={})):
+        """Speak once into the default microphone (Windows speech); returns the words. Used by `ramai voice`."""
+        import asyncio as _asyncio
+
+        from . import voice
+
+        lang = str(body.get("lang") or app.settings.get("voice_lang") or "en-IN")[:12]
+        try:
+            text = await _asyncio.to_thread(voice.listen, lang)
+        except voice.VoiceError as e:
+            raise HTTPException(409, str(e))
+        return {"text": text}
+
     @api.get("/api/autostart")
     async def autostart_get():
         return {"enabled": _startup_file().exists()}

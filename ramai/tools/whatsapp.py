@@ -299,7 +299,8 @@ class Desktop:
                 limit = tm.x if tm else hx + 400
                 parts = sorted([x for x in lines if abs(x.cy - ln.cy) <= 7 and ln.x < x.x < limit], key=lambda x: x.x)
                 title = " ".join([ln.text.strip()] + [x.text.strip() for x in parts])
-                rows.append({"title": title, "time": tm.text if tm else "", "preview": "", "cx": ln.cx, "cy": ln.cy, "y": ln.y})
+                rows.append({"title": title, "time": tm.text if tm else "", "preview": "", "cx": ln.cx, "cy": ln.cy, "y": ln.y,
+                             "section": section})
             elif below_prev and not prev["preview"]:
                 prev["preview"] = ln.text.strip()
         return rows
@@ -325,11 +326,36 @@ class Desktop:
         end = time.time() + 4
         while time.time() < end:
             time.sleep(0.3)
-            rows = match_rows(query, self.parse_rows(self.ocr_left()))
+            rows = self.parse_rows(self.ocr_left())
             key = [(r["title"], r["time"]) for r in rows]
             if key and key == last:
                 break
             last = key
+        rows = match_rows(query, self.refine_titles(rows))
+        try:
+            for r in rows:
+                self.app.people.note(wa_title=r["title"], source="whatsapp")
+        except Exception:
+            pass
+        return rows
+
+    def refine_titles(self, rows: list[dict]) -> list[dict]:
+        """WhatsApp paints the matching letters of search results in green and a whole-panel OCR often drops them
+        ('Suresh Babu' -> 'u Ram'). Reading each title row on its own gets the full name."""
+        from .. import ocr
+
+        L, T, r, b, split = self.geom()
+        for row in rows[:10]:
+            try:
+                lines = ocr.read_region(max(L, row["cx"] - 160), row["cy"] - 13, split, row["cy"] + 13, scale=2.0)
+            except Exception:
+                continue
+            best = max(lines, key=lambda x: len(x.text), default=None)
+            if best is None:
+                continue
+            text = TIME_TOKEN.sub(" ", " " + best.text + " ").strip() if TIME_TOKEN.search(" " + best.text) else best.text.strip()
+            if len(_norm(text)) > len(_norm(row["title"])) and (_norm(row["title"])[-4:] in _norm(text) or not row["title"]):
+                row["title"] = text
         return rows
 
     def clear_search(self):
@@ -343,22 +369,82 @@ class Desktop:
         self.clear_search()
         return rows
 
+    def ranked_matches(self, query: str, ctx) -> tuple[list[dict], list[str]]:
+        """Chats for a name or short form, best first. Tries: a short form you used before, the words as said, then names
+        from the people directory ('KVR' -> 'K V Rao'). Equally good matches are ordered by how much you interact:
+        recent chats first (WhatsApp lists them newest first), plus how often you messaged them through RAM AI."""
+        from ..people import clean_query, match as pmatch, norm as pnorm, rank
+
+        ppl = self.app.people
+        q = clean_query(query)
+        al = ppl.db.one("SELECT a.key, p.wa_title FROM aliases a JOIN people p ON p.key=a.key WHERE a.alias=? AND a.channel='whatsapp'", (q,))
+        tries = ([al["wa_title"]] if al and al["wa_title"] else []) + [query]
+        for c in ppl.candidates(query, "whatsapp") + ppl.candidates(query, "mail"):
+            nm = c.get("wa_title") or c.get("name")
+            if nm and c["score"] >= 0.8 and pnorm(nm) not in [pnorm(t) for t in tries]:
+                tries.append(nm)
+        rows, used = [], []
+        for t in tries[:4]:
+            used.append(t)
+            rows = self.search(t, ctx)
+            if rows:
+                break
+        cands = []
+        for i, r in enumerate(rows):
+            key = "wa:" + pnorm(r["title"])
+            sc, why = pmatch(query, r["title"])
+            if sc == 0 and used[-1] != query:
+                sc, why = 0.8, f"found as '{used[-1]}' (people you know)"
+            sc = max(sc, 0.6)
+            if al and al["key"] == key:
+                sc, why = 1.01, f"you used '{q}' for this chat before"
+            known = ppl.db.one("SELECT messaged FROM people WHERE key=?", (key,))
+            recent = max(0, 8 - i) if (r.get("section") or "chats").startswith("chats") else 0
+            cands.append({**r, "key": key, "score": round(sc, 2), "why": why or "WhatsApp search",
+                          "interactions": recent + 3 * (known["messaged"] if known else 0), "order": i})
+        return rank(cands), used
+
+    def reset_search(self):
+        """Clear WhatsApp's search box (its x button) so the chat list is not left filtered after RAM AI used it."""
+        import pyautogui
+
+        from .. import ocr
+
+        try:
+            L, T, r, b, split = self.geom()
+            xs = [x for x in ocr.read_region(L, T, split, T + 220, scale=2.0) if x.text.strip().lower() in ("x", "×")]
+            if xs:
+                self.fg_guard()
+                pyautogui.click(xs[0].cx, xs[0].cy)
+                time.sleep(0.2)
+        except Exception:
+            pass
+
     def open_chat(self, query: str, ctx, choice: int | None = None) -> str:
         import pyautogui
 
-        rows = self.search(query, ctx)
-        row, m = pick(query, rows, choice)
-        if not row:
-            self.clear_search()
-            if not m:
-                raise PolicyError(f"No WhatsApp chat named like '{query}'. Check the spelling or ask the user.")
-            raise PolicyError("AMBIGUOUS: several chats match. Ask the user which one (show title, last activity, preview), "
-                              f"then call again with choice=<number>. Candidates: {describe(m)}")
+        from ..people import explain
+
+        ranked, used = self.ranked_matches(query, ctx)
+        self.pick_note = ""
+        if not ranked:
+            self.reset_search()
+            raise PolicyError(f"No WhatsApp chat matches '{query}' (searched: {', '.join(used)}). Ask the user for the name as saved in WhatsApp.")
+        if choice is not None:
+            if not 1 <= choice <= len(ranked):
+                raise PolicyError(f"choice {choice} is out of range; there are {len(ranked)} matching chats: {describe(ranked)}")
+            row = ranked[choice - 1]
+            self.pick_note = f"option {choice} chosen: {row['title']}"
+        else:
+            row = ranked[0]
+            if len(ranked) > 1 or _norm(row["title"]) != _norm(query):
+                self.pick_note = explain(query, ranked, lambda c: c["title"])
         self.fg_guard()
         pyautogui.click(row["cx"], row["cy"])
         hdr = uia.wait_for(lambda: (lambda t: t if same_name(t, row["title"]) else None)(self.ocr_header()), 4, 0.25)
         if not hdr:
             raise PolicyError(f"Clicked '{row['title']}' but the open chat header shows '{self.ocr_header()}'. Nothing typed.")
+        self.reset_search()
         return row["title"]
 
     def focus_composer(self):
@@ -527,11 +613,16 @@ async def t_find(a: FindArgs, ctx):
     wa = ctx.app.whatsapp
     async with wa.lock:
         if wa.backend() == "desktop":
-            rows = await asyncio.to_thread(wa.desktop.find, a.query, ctx)
-            row, m = pick(a.query, rows)
-            return {"backend": "desktop", "candidates": describe(m), "unique_match": row["title"] if row else None,
-                    "next": "Unique match: proceed." if row else ("No match." if not m else
-                            "Several chats match (possibly with IDENTICAL names): ask the user which one, then pass choice=<number>.")}
+            def run():
+                ranked, used = wa.desktop.ranked_matches(a.query, ctx)
+                wa.desktop.reset_search()
+                return ranked, used
+            ranked, used = await asyncio.to_thread(run)
+            from ..people import explain
+            return {"backend": "desktop", "candidates": describe(ranked), "picked": ranked[0]["title"] if ranked else None,
+                    "why": explain(a.query, ranked, lambda c: c["title"]) if ranked else f"no chat found (searched {used})",
+                    "next": "whatsapp_send_message picks the first candidate automatically (best match; if tied, the chat you "
+                            "interact with most). Pass choice=<number> only if the user wants another one."}
         p, titles = await wa.web.titles(a.query)
         chosen, c2 = choose(a.query, titles)
         await p.keyboard.press("Escape")
@@ -567,7 +658,8 @@ async def t_prepare(a: MsgArgs, ctx):
                 wa.desktop.compose(a.text, ctx)
                 return title
             title = await asyncio.to_thread(run)
-            wa.prepared = {"contact": a.contact, "text": a.text, "choice": a.choice, "chat": title, "backend": "desktop"}
+            wa.prepared = {"contact": a.contact, "text": a.text, "choice": a.choice, "chat": title, "backend": "desktop",
+                           "why": getattr(wa.desktop, "pick_note", "")}
         else:
             p, titles = await wa.web.titles(a.contact)
             chosen, c2 = choose(a.contact, titles)
@@ -597,8 +689,9 @@ async def send_preview(a: MsgArgs, ctx):
     pr = ctx.app.whatsapp.prepared
     if not _same_prep(pr, a):
         raise PolicyError("Prepare this exact message first with whatsapp_prepare_message")
+    why = f"\nPicked: {pr['why']}" if pr.get("why") else ""
     return {"text": f"SEND WHATSAPP MESSAGE\nTo chat: {pr['chat']}  (you asked for: {a.contact}"
-                    f"{', option ' + str(a.choice) if a.choice else ''})\n--- message ---\n{a.text}",
+                    f"{', option ' + str(a.choice) if a.choice else ''}){why}\n--- message ---\n{a.text}",
             "digest": hashlib.sha256((a.contact + "\0" + a.text + "\0" + str(a.choice)).encode()).hexdigest()}
 
 
@@ -622,6 +715,13 @@ async def t_send(a: MsgArgs, ctx):
                     raise
             st = await asyncio.to_thread(run)
             wa.prepared = None
+            if st["box_empty"]:
+                try:
+                    from ..people import norm as pnorm
+                    ctx.app.people.note(wa_title=pr["chat"], source="whatsapp", sent="whatsapp")
+                    ctx.app.people.learn(a.contact, "whatsapp", "wa:" + pnorm(pr["chat"]))
+                except Exception:
+                    pass
             if st["box_empty"] and st["bubble_seen"]:
                 return {"sent_verified": True, "chat": pr["chat"], "evidence": "message box emptied and the new bubble shows the text"}
             if st["box_empty"]:
@@ -650,9 +750,9 @@ async def quick_preview(a: MsgArgs, ctx):
 
 def register(reg: Registry) -> None:
     R = Risk
-    reg.register(Tool("whatsapp_send_message", "FASTEST way to send a WhatsApp message by NAME in ONE call: finds and verifies the chat, types the text, gets approval, sends. If it reports AMBIGUOUS, ask the user and retry with choice.", MsgArgs, t_send, R.HIGH, 120, preview=quick_preview, reversible=False))
+    reg.register(Tool("whatsapp_send_message", "FASTEST way to send a WhatsApp message (also called a message/msg) in ONE call. contact may be a NAME or SHORT FORM (KVR, Suresh, Srini): the best-matching chat is picked (if several match equally, the one you interact with most) and shown on the approval card. Finds and verifies the chat, types the text, gets approval, sends. Use choice=<number> only if the user wants a different match.", MsgArgs, t_send, R.HIGH, 120, preview=quick_preview, reversible=False))
     reg.register(Tool("whatsapp_open", "Open WhatsApp (desktop app if installed, else web) and report readiness.", NoArgs, t_open, R.LOW, 60))
-    reg.register(Tool("whatsapp_find_chat", "Search WhatsApp by name; lists every matching chat (identical names are listed separately with last activity and preview).", FindArgs, t_find, R.READ, 60, untrusted=True))
+    reg.register(Tool("whatsapp_find_chat", "Search WhatsApp by name or short form; lists every matching chat best first (identical names listed separately) and which one would be picked.", FindArgs, t_find, R.READ, 60, untrusted=True))
     reg.register(Tool("whatsapp_read_chat", "Read the visible latest messages of a chat found by name.", ReadArgs, t_read, R.READ, 60, untrusted=True))
     reg.register(Tool("whatsapp_prepare_message", "Open the chat by name, verify it, and type the message WITHOUT sending. If it says AMBIGUOUS, ask the user and retry with choice.", MsgArgs, t_prepare, R.LOW, 90))
     reg.register(Tool("whatsapp_send_prepared", "Send the prepared message (same contact/text/choice). User sees recipient and exact text and must approve.", MsgArgs, t_send, R.HIGH, 60, preview=send_preview, reversible=False))

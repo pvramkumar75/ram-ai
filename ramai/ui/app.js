@@ -336,6 +336,64 @@ $("#form").onsubmit = async e => {
     tasks.set(t.id, t); renderTask(t);
   } catch (e) { $("#instr").value = ins; toast(e.message, 5000); }
 };
+// ---------------------------------------------------------------- hand-over: you fix something, the agent carries on
+async function pollTakeover() {
+  let st; try { st = await api("/takeover"); } catch { return; }
+  $("#takectl").classList.toggle("on", st.paused);
+  $("#takectl").textContent = st.paused ? "▶ Resume" : "🖐 Take control";
+  const w = st.waiting, bar = $("#tkbar");
+  if (w || st.paused) {
+    $("#tkmsg").textContent = w ? (w.paused ? "You have control. RAM AI is waiting - press Resume (or Ctrl+Alt+P) when you're done."
+      : "You're using the mouse/keyboard, so RAM AI paused. It continues 3 s after you stop, and checks the screen first.")
+      : "Take control is on: RAM AI will pause before its next screen action. Press Resume when you're done.";
+    bar.hidden = false;
+  } else bar.hidden = true;
+}
+async function setTakeover(on) { try { await api("/takeover", "POST", { on }); } catch (e) { toast(e.message); } pollTakeover(); }
+$("#takectl").onclick = () => setTakeover(!$("#takectl").classList.contains("on"));
+$("#tkresume").onclick = () => setTakeover(false);
+setInterval(() => { if (activeTasks().length || !$("#tkbar").hidden || $("#takectl").classList.contains("on")) pollTakeover(); }, 1000);
+
+// ---------------------------------------------------------------- voice input (Edge speech recognition, Windows speech as fallback)
+const voice = { rec: null, on: false, base: "" };
+function micUI(on) { voice.on = on; $("#mic").classList.toggle("on", on); $("#instr").classList.toggle("listening", on); $("#mic").textContent = on ? "■" : "🎤"; }
+function voiceDone(text) {
+  micUI(false);
+  const v = $("#instr").value.trim();
+  if (v && S?.settings?.voice_autosend) $("#form").requestSubmit(); else if (v) $("#instr").focus();
+  else if (text !== undefined) toast("I didn't catch that - try again, a little closer to the microphone.");
+}
+async function voiceServer() {   // Windows' own recognizer (needs 'Online speech recognition' on)
+  micUI(true); toast("Listening… (Windows speech)", 6000);
+  try { const r = await api("/voice/listen", "POST", { lang: S?.settings?.voice_lang }); $("#instr").value = (voice.base + " " + r.text).trim(); voiceDone(r.text); }
+  catch (e) { micUI(false); toast(e.message, 9000); }
+}
+function startVoice() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  voice.base = $("#instr").value.trim();
+  if (!SR) return voiceServer();
+  const r = new SR(); voice.rec = r;
+  r.lang = S?.settings?.voice_lang || "en-IN"; r.continuous = true; r.interimResults = true;
+  let finalText = "", silence;
+  const arm = () => { clearTimeout(silence); silence = setTimeout(() => { try { r.stop(); } catch { } }, 2200); };
+  r.onstart = () => { micUI(true); arm(); };
+  r.onresult = e => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) { const t = e.results[i][0].transcript; if (e.results[i].isFinal) finalText += t + " "; else interim += t; }
+    $("#instr").value = (voice.base + " " + finalText + interim).replace(/\s+/g, " ").trim(); arm();
+  };
+  r.onerror = e => {
+    clearTimeout(silence); micUI(false); voice.rec = null;
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") toast("Microphone blocked. Allow it for RAM AI (the lock/camera icon in the window's address area) and in Windows Settings > Privacy > Microphone.", 9000);
+    else if (e.error === "network") voiceServer();
+    else if (e.error !== "no-speech" && e.error !== "aborted") toast("Voice input error: " + e.error, 5000);
+  };
+  r.onend = () => { clearTimeout(silence); if (voice.rec === r) { voice.rec = null; voiceDone(finalText); } };
+  try { r.start(); } catch (x) { voiceServer(); }
+}
+function toggleVoice() { if (voice.on) { try { voice.rec?.stop(); } catch { } if (!voice.rec) micUI(false); } else startVoice(); }
+$("#mic").onclick = toggleVoice;
+document.addEventListener("keydown", e => { if (e.ctrlKey && !e.altKey && (e.key === "m" || e.key === "M")) { e.preventDefault(); toggleVoice(); } });
 $("#instr").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#form").requestSubmit(); } });
 document.querySelectorAll(".hint-row").forEach(h => h.onclick = () => { $("#instr").value = h.dataset.q; $("#instr").focus(); });
 $("#stop").onclick = async () => {
@@ -521,7 +579,9 @@ async function renderSettings() {
   <section><h3>Memory (user-approved preferences)</h3><div id="mem"></div></section>
   <section><h3>General</h3><div class="row"><input id="g-user" value="${esc(s.user_name || "")}" placeholder="Your name"><button id="g-usave">Save my name</button></div>
     <div class="row"><input id="g-name" value="${esc(s.device_name)}"><button id="g-save">Rename this PC</button></div>
-    <p class="muted">Version ${esc(S.version)} · Emergency stop: Ctrl+Alt+Q · Retention: ${esc(s.retention_days)} days</p></section>`;
+    <div class="row"><label class="muted" style="flex:0 0 auto">🎤 Voice language</label><select id="g-vlang">${[["en-IN", "English (India)"], ["en-US", "English (US)"], ["en-GB", "English (UK)"], ["hi-IN", "Hindi"], ["te-IN", "Telugu"], ["ta-IN", "Tamil"], ["kn-IN", "Kannada"], ["ml-IN", "Malayalam"], ["mr-IN", "Marathi"], ["bn-IN", "Bengali"], ["gu-IN", "Gujarati"]].map(([v, n]) => `<option value="${v}" ${v === (s.voice_lang || "en-IN") ? "selected" : ""}>${n}</option>`).join("")}</select>
+      <label class="tog" style="flex:0 0 auto"><input type="checkbox" id="g-vauto" ${s.voice_autosend ? "checked" : ""}> Send as soon as I stop speaking</label></div>
+    <p class="muted">Version ${esc(S.version)} · Emergency stop: Ctrl+Alt+Q · Take control: Ctrl+Alt+P · Voice: Ctrl+M · Retention: ${esc(s.retention_days)} days</p></section>`;
   const out = (id, ok, m) => { const o = $(id); o.className = "msg " + (ok ? "ok" : "err"); o.textContent = m; };
   const guard = fn => async () => { try { await fn(); } catch (e) { toast(e.message, 5000); } };
   const secretOf = { deepseek: "deepseek", openai: "openai", sarvam: "sarvam", local: "local_llm", custom: "custom_llm" };
@@ -569,6 +629,8 @@ async function renderSettings() {
   el.querySelectorAll("[data-unpair]").forEach(a => a.onclick = guard(async e => { e?.preventDefault?.(); await api("/peers/" + a.dataset.unpair, "DELETE"); renderSettings(); loadDevices(); }));
   $("#g-usave").onclick = guard(async () => { await api("/settings", "POST", { user_name: $("#g-user").value.trim() }); toast("Saved"); });
   $("#g-save").onclick = guard(async () => { await api("/settings", "POST", { device_name: $("#g-name").value }); renderSettings(); });
+  $("#g-vlang").onchange = guard(async () => { await api("/settings", "POST", { voice_lang: $("#g-vlang").value }); S.settings.voice_lang = $("#g-vlang").value; toast("Voice language saved"); });
+  $("#g-vauto").onchange = guard(async () => { await api("/settings", "POST", { voice_autosend: $("#g-vauto").checked }); S.settings.voice_autosend = $("#g-vauto").checked; toast("Saved"); });
   const mem = await api("/memory");
   $("#mem").innerHTML = mem.map(m => `<div class="row"><span>${esc(m.key)} = ${esc(m.value)}</span><button class="ghost" data-mk="${esc(m.key)}">Delete</button></div>`).join("") || '<p class="muted">Empty.</p>';
   el.querySelectorAll("[data-mk]").forEach(b => b.onclick = guard(async () => { await api("/memory/" + encodeURIComponent(b.dataset.mk), "DELETE"); renderSettings(); }));
