@@ -137,16 +137,3 @@ main#view-sched{flex:1;overflow:auto;padding:16px}
 
 /* docked beside the work (narrow): the real screen is right next to us, so show only steps + approvals */
 @media (max-width:700px){#screen-pane{display:none}#work-pane{flex:1 1 auto}main.split{flex-direction:column}#tabs,nav .tab{font-size:12.5px}.hint-row{font-size:12.5px}}
-
-/* Teach mode */
-#teach.on{background:#d93025;color:#fff;border-color:#d93025}
-.teachbar{background:#fdecea;color:#8a1c14;border-color:#f3a59d}.teachbar .tki{color:#d93025;animation:micpulse 1.2s ease-in-out infinite}
-@media (prefers-color-scheme: dark){.teachbar{background:#3a1512;color:#ffb4ab;border-color:#7a2a22}}
-.teach-card{width:min(720px,94vw);max-width:720px;max-height:90vh;overflow:auto}
-.teach-card label{display:block;margin:8px 0}
-#tm-steps{max-height:42vh;overflow:auto;border:1px solid var(--bd);border-radius:8px;padding:4px 8px;margin:6px 0 10px;background:var(--bg)}
-.tm-win{font-size:11.5px;font-weight:600;color:var(--mut);margin:8px 0 2px}
-.tm-step{display:flex;gap:8px;align-items:flex-start;padding:3px 0;font-size:13px}
-.tm-step input{width:auto;margin-top:3px}.tm-step.typed .tx{color:var(--warn)}.tm-step.off .tx{text-decoration:line-through;color:var(--mut)}
-#tm-content{font:12.5px Consolas,monospace;min-height:260px}
-.teach-card .row{display:flex;gap:8px;margin-top:8px}
