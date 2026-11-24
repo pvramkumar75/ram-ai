@@ -195,6 +195,7 @@ class OpenAppArgs(Args):
 
 class OpenUrlArgs(Args):
     url: str = Field(pattern=r"^https?://[^\s]+$", max_length=1000)
+    in_browser: bool = Field(False, description="Force the browser even if the service has an installed desktop app (only if the user asked for the website)")
 
 
 class NoArgs(Args):
@@ -349,6 +350,13 @@ def t_open_app(a: OpenAppArgs, ctx):
 
 
 def t_open_url(a: OpenUrlArgs, ctx):
+    from .apps import app_for_url, launch
+
+    name = None if a.in_browser else app_for_url(a.url)
+    if name and getattr(ctx.app, "start_apps", None) and ctx.app.start_apps.has(name):
+        res = launch(ctx.app, name)   # the installed desktop app comes first, like 'open Grok'
+        return {**res, "note": f"{name} is installed as a desktop app, so it was opened instead of {a.url}. "
+                               "Pass in_browser=true only if the user wants the website."}
     subprocess.Popen(["cmd", "/c", "start", "", "msedge", a.url], creationflags=0x08000000)
     time.sleep(1.5)
     return {"opened": a.url}
@@ -434,5 +442,5 @@ def register(reg: Registry) -> None:
     reg.register(Tool("hotkey", "Press a keyboard shortcut, e.g. ['ctrl','s'].", HotkeyArgs, t_hotkey,
                       _hotkey_risk, 10, control=True, check=_check_hotkey))
     reg.register(Tool("scroll", "Scroll the window under the pointer.", ScrollArgs, t_scroll, R.LOW, 10, control=True))
-    reg.register(Tool("wait", "Wait for the UI to update.", WaitArgs, t_wait, R.READ, 20))
-    reg.register(Tool("open_url", "Open an http(s) URL in Microsoft Edge.", OpenUrlArgs, t_open_url, R.LOW, 20))
+    reg.register(Tool("wait", "Wait for the UI to update (up to 120 s).", WaitArgs, t_wait, R.READ, 125))
+    reg.register(Tool("open_url", "Open a specific web page (http/https) in Edge. For 'open <app/service>' use launch_app instead; a service home page (grok.com, chatgpt.com...) opens its installed desktop app.", OpenUrlArgs, t_open_url, R.LOW, 30))

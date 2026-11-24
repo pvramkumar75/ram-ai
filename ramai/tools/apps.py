@@ -20,7 +20,28 @@ WEB_FALLBACK = {
     "excel": "https://www.office.com/launch/excel", "word": "https://www.office.com/launch/word",
     "powerpoint": "https://www.office.com/launch/powerpoint", "onedrive": "https://onedrive.live.com",
     "drive": "https://drive.google.com", "sheets": "https://docs.google.com/spreadsheets", "docs": "https://docs.google.com/document",
+    "grok": "https://grok.com", "chatgpt": "https://chatgpt.com", "claude": "https://claude.ai", "copilot": "https://copilot.microsoft.com",
+    "perplexity": "https://www.perplexity.ai", "gemini": "https://gemini.google.com", "deepseek": "https://chat.deepseek.com",
+    "youtube": "https://www.youtube.com", "linkedin": "https://www.linkedin.com", "zoom": "https://app.zoom.us",
 }
+# website -> desktop app with the same service: "open grok.com" opens the installed Grok app instead
+APP_SITES = {"grok.com": "Grok", "x.ai": "Grok", "chatgpt.com": "ChatGPT", "chat.openai.com": "ChatGPT", "claude.ai": "Claude",
+             "copilot.microsoft.com": "Copilot", "web.whatsapp.com": "WhatsApp", "outlook.office.com": "Outlook",
+             "outlook.office365.com": "Outlook", "outlook.live.com": "Outlook", "teams.microsoft.com": "Microsoft Teams",
+             "teams.live.com": "Microsoft Teams", "www.perplexity.ai": "Perplexity", "perplexity.ai": "Perplexity",
+             "chat.deepseek.com": "DeepSeek", "app.zoom.us": "Zoom", "web.telegram.org": "Telegram", "open.spotify.com": "Spotify"}
+
+
+def app_for_url(url: str) -> str | None:
+    """The desktop app for a service's HOME page (grok.com, chatgpt.com/...). Specific pages (a search, a document) stay in the browser."""
+    from urllib.parse import urlparse
+
+    u = urlparse(url)
+    host, path = (u.hostname or "").lower(), (u.path or "/").rstrip("/")
+    name = APP_SITES.get(host) or APP_SITES.get(host.removeprefix("www."))
+    if name and path in ("", "/new", "/chat", "/c", "/i", "/mail", "/mail/inbox") and not u.query:
+        return name
+    return None
 # window-title words for apps whose title differs from their Start-menu name
 TITLE_HINT = {"whatsapp": "whatsapp", "outlook": "outlook", "excel": "excel", "word": "word", "teams": "teams",
               "notepad": "notepad", "calculator": "calculator"}
@@ -101,7 +122,7 @@ def launch(app, name: str, prefer_web: bool = False, wait: float = 12.0) -> dict
 
 # ------------------------------------------------------------------ tools
 class LaunchArgs(Args):
-    name: str = Field(max_length=60, description="App name, e.g. 'WhatsApp', 'Outlook', 'Excel', 'Notepad'")
+    name: str = Field(max_length=60, description="App or service name, e.g. 'WhatsApp', 'Outlook', 'Excel', 'Grok', 'ChatGPT', 'Claude', 'SAP Logon'")
     prefer_web: bool = False
 
 
@@ -211,7 +232,7 @@ def t_ui_type(a: UiTypeArgs, ctx):
 
 def register(reg: Registry) -> None:
     R = Risk
-    reg.register(Tool("launch_app", "Open (or focus) any installed app by name; if not installed, opens its web version. ALWAYS use this first when the user mentions an app (WhatsApp, Outlook, Excel...).", LaunchArgs, t_launch, R.LOW, 30))
+    reg.register(Tool("launch_app", "Open (or focus) any app or online service BY NAME: the installed desktop app first (WhatsApp, Outlook, Excel, Grok, ChatGPT, Claude, Copilot, Teams, SAP Logon...), else its web version. ALWAYS use this when the user says 'open X'.", LaunchArgs, t_launch, R.LOW, 30))
     reg.register(Tool("focus_window", "Bring an open window to the front by part of its title.", FocusArgs, t_focus, R.LOW, 10))
     reg.register(Tool("ui_elements", "FAST list of named controls in the foreground window (name, type, centre).", UiElementsArgs, t_ui_elements, R.READ, 30, untrusted=True))
     reg.register(Tool("ui_click", "FAST click/invoke a control by exact name in the foreground window.", UiClickArgs, t_ui_click, lambda a: _send_risk(a.name), 20, control=True))

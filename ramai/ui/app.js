@@ -605,6 +605,7 @@ async function renderSettings() {
     <div class="row"><input id="g-name" value="${esc(s.device_name)}"><button id="g-save">Rename this PC</button></div>
     <div class="row"><label class="muted" style="flex:0 0 auto">🎤 Voice language</label><select id="g-vlang">${[["en-IN", "English (India)"], ["en-US", "English (US)"], ["en-GB", "English (UK)"], ["hi-IN", "Hindi"], ["te-IN", "Telugu"], ["ta-IN", "Tamil"], ["kn-IN", "Kannada"], ["ml-IN", "Malayalam"], ["mr-IN", "Marathi"], ["bn-IN", "Bengali"], ["gu-IN", "Gujarati"]].map(([v, n]) => `<option value="${v}" ${v === (s.voice_lang || "en-IN") ? "selected" : ""}>${n}</option>`).join("")}</select>
       <span class="muted small" style="flex:0 0 auto">Hold 🎤 (or Ctrl+M) while you speak, let go to send</span></div>
+    <div class="row"><label class="tog"><input type="checkbox" id="g-dock" ${s.dock_while_working !== false ? "checked" : ""}> While a task runs, keep RAM AI on the right edge of the screen and the apps it works in on the left, so the work never hides this page</label></div>
     <p class="muted">Version ${esc(S.version)} · Emergency stop: Ctrl+Alt+Q · Take control: Ctrl+Alt+P · Voice: hold Ctrl+M · Retention: ${esc(s.retention_days)} days</p></section>`;
   const out = (id, ok, m) => { const o = $(id); o.className = "msg " + (ok ? "ok" : "err"); o.textContent = m; };
   const guard = fn => async () => { try { await fn(); } catch (e) { toast(e.message, 5000); } };
@@ -653,6 +654,7 @@ async function renderSettings() {
   el.querySelectorAll("[data-unpair]").forEach(a => a.onclick = guard(async e => { e?.preventDefault?.(); await api("/peers/" + a.dataset.unpair, "DELETE"); renderSettings(); loadDevices(); }));
   $("#g-usave").onclick = guard(async () => { await api("/settings", "POST", { user_name: $("#g-user").value.trim() }); toast("Saved"); });
   $("#g-save").onclick = guard(async () => { await api("/settings", "POST", { device_name: $("#g-name").value }); renderSettings(); });
+  $("#g-dock").onchange = guard(async () => { await api("/settings", "POST", { dock_while_working: $("#g-dock").checked }); toast("Saved"); });
   $("#g-vlang").onchange = guard(async () => { await api("/settings", "POST", { voice_lang: $("#g-vlang").value }); S.settings.voice_lang = $("#g-vlang").value; toast("Voice language saved"); });
   const mem = await api("/memory");
   $("#mem").innerHTML = mem.map(m => `<div class="row"><span>${esc(m.key)} = ${esc(m.value)}</span><button class="ghost" data-mk="${esc(m.key)}">Delete</button></div>`).join("") || '<p class="muted">Empty.</p>';

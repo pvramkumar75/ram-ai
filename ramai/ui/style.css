@@ -134,3 +134,6 @@ main#view-sched{flex:1;overflow:auto;padding:16px}
 .tkbar button{padding:5px 12px}
 #takectl.on{background:#f59e0b;color:#fff;border-color:#f59e0b}
 @media (prefers-color-scheme: dark){.tkbar{background:#3a2a10;color:#ffd9a0;border-color:#7a5a20}}
+
+/* docked beside the work (narrow): the real screen is right next to us, so show only steps + approvals */
+@media (max-width:700px){#screen-pane{display:none}#work-pane{flex:1 1 auto}main.split{flex-direction:column}#tabs,nav .tab{font-size:12.5px}.hint-row{font-size:12.5px}}

@@ -113,6 +113,9 @@ class App:
         from .takeover import Takeover
 
         self.takeover = Takeover(self)
+        from .dock import Dock
+
+        self.dock = Dock(self)
         try:
             self.people.bootstrap_from_audit()  # first run: learn who you already mailed / messaged through RAM AI
         except Exception:

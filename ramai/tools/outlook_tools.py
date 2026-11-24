@@ -9,7 +9,9 @@ import json
 import re
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
+
+from ..signoff import strip_ai_signoff, strip_closing_block
 
 from ..policy import BLOCKED_FILE, PolicyError, Risk
 from . import outlook as _ol
@@ -76,6 +78,11 @@ class DraftArgs(Args):
     reply_all: bool = False
     forward_message_id: str | None = None
     attachment_paths: list[str] = Field(default_factory=list, max_length=5)
+
+    @field_validator("body")
+    @classmethod
+    def _no_ai_signoff(cls, v: str) -> str:  # never 'Regards, RAM AI (on behalf of ...)'
+        return strip_ai_signoff(v)
 
 
 class SendArgs(Args):
@@ -334,7 +341,8 @@ async def _compose_window(a, ctx) -> dict:
     from . import outlook_window as ow
 
     files = [ctx.app.policy.resolve(fp, must_exist=True) for fp in a.attachment_paths]
-    return await asyncio.to_thread(ow.compose, a.to, a.cc, a.subject, a.body, files, ctx,
+    body = strip_closing_block(a.body)  # Outlook adds the user's own signature below the text: no second 'Regards, name'
+    return await asyncio.to_thread(ow.compose, a.to, a.cc, a.subject, body, files, ctx,
                                    _ol._id(a.reply_to_message_id) if a.reply_to_message_id else None, a.reply_all,
                                    _ol._id(a.forward_message_id) if a.forward_message_id else None)
 

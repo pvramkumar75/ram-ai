@@ -477,8 +477,16 @@ def read_many(ids: list[str], max_chars: int = 1500) -> list[dict]:
             for i in ids:
                 try:
                     res.append(_read_via_window(ol, ns, i, max_chars))
-                except Exception as e:
-                    res.append({"id": i, "error": f"{type(e).__name__}: {str(e)[:120]}"})
+                except Exception:
+                    # Outlook busy (sync, another program): "RPC server unavailable" kills this connection - wait, reconnect, retry once
+                    time.sleep(1.5)
+                    try:
+                        with com() as ol2:
+                            ol, ns = ol2, ol2.GetNamespace("MAPI")
+                            res.append(_read_via_window(ol, ns, i, max_chars))
+                    except Exception as e2:
+                        res.append({"id": i, "error": f"{type(e2).__name__}: {str(e2)[:120]}",
+                                    "hint": "Outlook was busy; retry this id in a few seconds with outlook_read_many."})
             return res
         for i in ids:
             try:

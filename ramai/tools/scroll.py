@@ -158,8 +158,16 @@ def _pane_rect(ctx, a: ScrollToTextArgs):
             raise PolicyError("That point is outside the window in front.")
         return h, (l, t, r, b), (a.x, a.y)
     w = r - l
-    pl, pr = pane_bounds(uia.window_title(h), w, a.pane)
-    pl, pr = l + pl, l + pr
+    split = None
+    if "whatsapp" in uia.window_title(h).lower() and a.pane in ("left", "right"):
+        from .whatsapp import find_split
+
+        split = find_split(h)
+    if split:
+        pl, pr = (l, split) if a.pane == "left" else (split, r)
+    else:
+        pl, pr = pane_bounds(uia.window_title(h), w, a.pane)
+        pl, pr = l + pl, l + pr
     top = t + min(90, (b - t) // 6)               # skip title bar / toolbar rows when choosing the wheel point
     return h, (pl, t, pr, b), ((pl + pr) // 2, (top + b) // 2)
 

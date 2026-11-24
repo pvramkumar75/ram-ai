@@ -15,7 +15,7 @@ import hashlib
 import re
 import time
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from .. import uia
 from ..policy import PolicyError, Risk
@@ -25,7 +25,48 @@ WA_TITLE = re.compile(r"^(\(\d+\)\s*)?WhatsApp$", re.I)
 TIME_TOKEN = re.compile(
     r"\s+(\d{1,2}:\d{2}(?:\s?[ap]m)?|Yesterday|Today|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
     r"Mon|Tue|Wed|Thu|Fri|Sat|Sun|\d{1,2}/\d{1,2}/\d{2,4})(\s|$)", re.I)
-LEFT_RATIO = 0.285  # chat list width as a fraction of the (maximised) window
+LEFT_RATIO = 0.285  # fallback only: chat list width as a fraction of the (maximised) window
+_split_cache: dict = {}
+
+
+def find_split(h: int) -> int | None:
+    """Screen x of the line between WhatsApp's chat list and the open chat. The list has a fixed width (and the user can
+    drag it), so it is measured on screen: the first column right of 250 px that is one solid colour top to bottom while
+    the column just right of it differs. Cached per window position/size."""
+    from .. import capture
+
+    try:
+        l, t, r, b = uia.rect(uia.root(h))
+    except Exception:
+        return None
+    key = (h, l, t, r, b)
+    if key in _split_cache:
+        return _split_cache[key]
+    found = None
+    try:
+        img, rc = capture.capture_window(h)
+        img = img.convert("RGB")
+        W, H = img.size
+        px = img.load()
+        ys = list(range(int(H * 0.25), int(H * 0.9), 6))
+
+        def close(a, c, tol):
+            return sum(abs(p - q) for p, q in zip(a, c)) <= tol
+
+        for x in range(250, min(W - 3, int(W * 0.7))):
+            col = [px[x, y] for y in ys]
+            base = max(set(col), key=col.count)
+            if sum(close(c, base, 12) for c in col) < 0.9 * len(col):
+                continue
+            if sum(not close(px[x + 2, y], c, 6) for y, c in zip(ys, col)) >= 0.6 * len(col):
+                found = rc[0] + x + 1
+                break
+    except Exception:
+        found = None
+    if len(_split_cache) > 20:
+        _split_cache.clear()
+    _split_cache[key] = found
+    return found
 
 
 def find_wa_window() -> int | None:
@@ -215,7 +256,7 @@ class Desktop:
     def geom(self):
         l, t, r, b = uia.rect(uia.root(self.h))
         L, T = max(l, 0), max(t, 0)
-        split = l + int((r - l) * LEFT_RATIO)
+        split = find_split(self.h) or (l + int((r - l) * LEFT_RATIO))
         return L, T, r, b, split
 
     def ocr_left(self):
@@ -315,23 +356,27 @@ class Desktop:
         heads = sorted([x for x in lines if _norm(x.text) == "chats"], key=lambda x: x.y)
         if not heads:
             raise PolicyError("Chat list not visible")
-        self.fg_guard()
-        pyautogui.click(heads[0].x + 140, heads[0].cy + 66)  # the search box under the 'Chats' title
-        time.sleep(0.15)
-        self.fg_guard()
-        pyautogui.hotkey("ctrl", "a")
-        pyautogui.press("backspace")
-        type_unicode(query, ctx, 0.004)
-        last, rows = None, []
-        end = time.time() + 4
-        while time.time() < end:
-            time.sleep(0.3)
-            rows = self.parse_rows(self.ocr_left())
-            key = [(r["title"], r["time"]) for r in rows]
-            if key and key == last:
+        rows = []
+        for attempt in range(2):  # WhatsApp is sometimes slow to show results (busy, just woke up): type once more and wait longer
+            self.fg_guard()
+            pyautogui.click(heads[0].x + 140, heads[0].cy + 66)  # the search box under the 'Chats' title
+            time.sleep(0.15)
+            self.fg_guard()
+            pyautogui.hotkey("ctrl", "a")
+            pyautogui.press("backspace")
+            type_unicode(query, ctx, 0.004)
+            last, rows = None, []
+            end = time.time() + (4 if attempt == 0 else 7)
+            while time.time() < end:
+                time.sleep(0.3)
+                rows = self.parse_rows(self.ocr_left())
+                key = [(r["title"], r["time"]) for r in rows]
+                if key and key == last:
+                    break
+                last = key
+            rows = match_rows(query, self.refine_titles(rows))
+            if rows:
                 break
-            last = key
-        rows = match_rows(query, self.refine_titles(rows))
         try:
             for r in rows:
                 self.app.people.note(wa_title=r["title"], source="whatsapp")
@@ -603,6 +648,13 @@ class MsgArgs(Args):
     contact: str = Field(max_length=120, description="Name as the user said it")
     text: str = Field(min_length=1, max_length=4000)
     choice: int | None = Field(None, ge=1, le=50, description="Only when several chats share the name: the number the user picked from the candidates")
+
+    @field_validator("text")
+    @classmethod
+    def _no_ai_signoff(cls, v: str) -> str:
+        from ..signoff import strip_ai_signoff
+
+        return strip_ai_signoff(v)
 
 
 async def t_open(a, ctx):

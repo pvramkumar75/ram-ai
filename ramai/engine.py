@@ -152,6 +152,9 @@ def wrap_untrusted(payload: Any) -> str:
             f"{s}\n<<<EXTERNAL_DATA_END>>>")
 
 
+CLAIMS_DONE = re.compile(r"\b(sent|mailed|e-?mailed|messaged|forwarded|replied|posted|saved|created|opened|scheduled|downloaded|uploaded|deleted|moved|renamed|exported|installed|launched|done|completed|finished)\b", re.I)
+
+
 class Executor:
     def __init__(self, app, registry: Registry):
         self.app, self.reg = app, registry
@@ -323,11 +326,20 @@ RULES (policy is enforced by software; you cannot change it):
 9. Be FAST: use the fewest tool calls. Put independent read calls in the same step. Never use screenshots/clicking for files or folders: use list_folder, search_files, create_folder, move_files.
 
 APP PLAYBOOK (fast, reliable — use these instead of screenshots/clicking):
-- Any app: launch_app(name) opens the installed desktop app (or its web version if not installed).
+- Any app or online service ('open Grok', 'open ChatGPT', 'open Teams', 'open SAP'): launch_app(name) - it opens the INSTALLED
+  DESKTOP APP first and the web version only if the app is not installed. Never open_url a service's home page yourself;
+  open_url is for a specific page (a search results URL, a document link) or when the user asks for the website.
 - WhatsApp: whatsapp_send_message(contact=<name as said>, text) does EVERYTHING in one call. Do not call whatsapp_open/find first.
   WhatsApp messages can be very long (~65,000 characters): ALWAYS send one message, never split an article into parts.
   WhatsApp text: plain text; for lists write "1." "2." normally (the tool pastes, so WhatsApp will not double-number). If it fails,
   report the error - never press Enter or click Send in WhatsApp yourself (those are sends and need approval anyway).
+- NEVER script Outlook, WhatsApp or other apps yourself through PowerShell/Python COM or automation libraries: it makes Outlook
+  pop up security prompts for the user. Use the outlook_* / whatsapp_* tools; if outlook_read_many reports an error for some
+  ids, call it again for those ids after a few seconds.
+- SIGN-IN: if a website or app shows a sign-in page or an account chooser (Google/Microsoft/Apple), do not pick an account or
+  sign in yourself - ask_user to sign in (or which account), then continue.
+- SIGNING: write mail and messages AS the user. Never sign as RAM AI, never write 'on behalf of', never mention that an AI
+  wrote it. Email body: end with the content - Outlook adds the user's own signature (with Regards and name) underneath.
 - WORDS: 'mail', 'email', 'e-mail' = Outlook (send_email). 'message', 'messages', 'msg', 'text', 'ping', 'WhatsApp' = WhatsApp
   (whatsapp_send_message). Ask which channel only if the user says something else ambiguous like 'tell X' or 'inform X'.
 - PEOPLE: the user often uses short forms - initials (KVR, PVR), first names (Suresh), nicknames (Srini, Venky), the part of an
@@ -501,12 +513,25 @@ class Orchestrator:
         tk = getattr(app, "takeover", None)
         if tk:
             tk.arm()  # watch for the user's hands while this task runs
+        dock = getattr(app, "dock", None)
+        if dock:
+            try:
+                dock.start()  # RAM AI on the right, the work on the left, so the user sees both
+            except Exception:
+                dock = None
         messages: list[dict] = [{"role": "system", "content": self._system_prompt(ctx)}]
-        prev = app.db.query("SELECT instruction,result FROM tasks WHERE state='Completed' AND result IS NOT NULL ORDER BY updated DESC LIMIT 4")
-        for r in reversed(prev):
-            messages.append({"role": "user", "content": r["instruction"]})
-            messages.append({"role": "assistant", "content": (r["result"] or "")[:1500]})
+        if not ctx.schedule:  # scheduled runs start clean: they must never copy the previous run's report
+            prev = app.db.query("SELECT instruction,result FROM tasks WHERE state='Completed' AND result IS NOT NULL "
+                                "AND instruction NOT LIKE '[Scheduled%' ORDER BY updated DESC LIMIT 4")
+            if prev:
+                hist = "\n".join(f"- Request: {r['instruction'][:300]}\n  Outcome then: {(r['result'] or '')[:600]}" for r in reversed(prev))
+                messages.append({"role": "user", "content": "BACKGROUND ONLY - recent FINISHED tasks, for context (names, files, preferences). "
+                                 "They are over: never reuse their outcomes as if done now. Every new request must be carried out "
+                                 "again with tools.\n" + hist})
+                messages.append({"role": "assistant", "content": "Understood - background only. I will act on the new request with tools."})
         messages.append({"role": "user", "content": instruction})
+        acted = 0          # tool calls that actually did something in THIS task
+        pushed_back = False
         try:
             last_fail: dict[str, int] = {}
             limit = user_step_limit(instruction)  # only a limit the user asked for
@@ -530,6 +555,16 @@ class Orchestrator:
                     app.db.audit(tid, ctx.device, "thought", None, {"text": thought[:2500], "secs": round(time.time() - (started or time.time()), 1)})
                 if not calls:
                     final = msg.get("content") or "(no response)"
+                    if not acted and not pushed_back and (ctx.schedule or CLAIMS_DONE.search(final)):
+                        # a report of actions with zero tool calls is not true: make it do the work (once)
+                        pushed_back = True
+                        app.db.audit(tid, ctx.device, "thought", None, {"text": "Checking: no action was taken yet, so I'm doing the task now instead of reporting."})
+                        messages.append({"role": "assistant", "content": final})
+                        messages.append({"role": "user", "content": "[RAM AI check] You have not called any tool in THIS task, so nothing has "
+                                         "been done yet - your reply describes results that did not happen now. Do not reuse earlier "
+                                         "results. Carry out the request now using the tools; if it needs nothing done, say plainly that "
+                                         "you took no action."})
+                        continue
                     app.db.exec("UPDATE tasks SET state='Completed',result=?,updated=? WHERE id=?", (final, time.time(), tid))
                     app.db.audit(tid, ctx.device, "task_completed", None, {"result": final[:500]})
                     return
@@ -548,6 +583,8 @@ class Orchestrator:
                         fn = c.get("function", {})
                         outs.append(await ex.execute(ctx, fn.get("name", ""), fn.get("arguments", "{}")))
                 for c, (out, ok) in zip(calls, outs):
+                    if c.get("function", {}).get("name") not in ("set_plan", "remember", "ask_user"):
+                        acted += 1
                     sig = c.get("function", {}).get("name", "") + c.get("function", {}).get("arguments", "")
                     fails_in_row = 0 if ok else fails_in_row + 1
                     repeat_n = repeat_n + 1 if sig == repeat_sig else 1
@@ -580,3 +617,8 @@ class Orchestrator:
             app.indicator.hide()
             if tk:
                 tk.disarm()
+            if dock:
+                try:
+                    dock.stop()
+                except Exception:
+                    pass
