@@ -8,6 +8,15 @@ $Log = Join-Path $Root 'install_log.txt'
 try { Start-Transcript -Path $Log -Force | Out-Null } catch {}
 
 function Step($t) { Write-Host "`n==> $t" -ForegroundColor Cyan }
+function Invoke-Native([string]$Exe, [string[]]$ArgList, [int]$Tail = 15) {
+    # Windows PowerShell 5.1 turns every line a program writes to stderr (pip warnings, retry notices) into a fatal error
+    # when $ErrorActionPreference is 'Stop'. Run external tools with 'Continue' and judge them only by their exit code.
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $lines = @(& $Exe @ArgList 2>&1 | ForEach-Object { "$_" }); $code = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $old }
+    if ($Tail -gt 0) { $lines | Select-Object -Last $Tail | Out-Host }
+    return $code
+}
 function Ask($q) { if ($Unattended) { return $true }; $a = Read-Host "$q [Y/n]"; return ($a -eq '' -or $a -match '^[Yy]') }
 function Fail($msg, $hint) {
     Write-Host "`nSETUP FAILED: $msg" -ForegroundColor Red
@@ -26,6 +35,7 @@ try {
     Step "Checking Python"
     function Test-Py($exe, $extra) {
         try {
+            $ErrorActionPreference = 'Continue'   # a warning on stderr must not hide a good Python (local to this function)
             $out = & $exe @extra -c "import sys,struct; v=sys.version_info; print((3,11)<=v[:2]<=(3,13), struct.calcsize('P')*8, sys.executable)" 2>$null
             if ($LASTEXITCODE -eq 0 -and $out -match '^True 64 (.+)$') { return $Matches[1].Trim() }
         } catch {}
@@ -68,14 +78,14 @@ try {
     $venv = Join-Path $Root '.venv'
     $vpy = Join-Path $venv 'Scripts\python.exe'
     if (-not (Test-Path $vpy)) { & $py -m venv $venv; if ($LASTEXITCODE -ne 0) { Fail "Could not create the Python environment." "Check that $Root is not read-only, then retry." } }
-    & $vpy -m pip install --upgrade pip -q --disable-pip-version-check 2>&1 | Out-Host
-    & $vpy -m pip install -r (Join-Path $Root 'requirements.txt') --prefer-binary --disable-pip-version-check 2>&1 | Select-Object -Last 15 | Out-Host
-    if ($LASTEXITCODE -ne 0) {
+    $null = Invoke-Native $vpy @('-m', 'pip', 'install', '--upgrade', 'pip', '-q', '--disable-pip-version-check') 5
+    $code = Invoke-Native $vpy @('-m', 'pip', 'install', '-r', (Join-Path $Root 'requirements.txt'), '--prefer-binary', '--disable-pip-version-check') 15
+    if ($code -ne 0) {
         Fail "Downloading/installing packages failed." ("If this is an office network with a proxy, ask IT for the proxy address and run in this window:  setx HTTPS_PROXY http://proxy:port  - then run setup again. " +
               "Otherwise check the internet connection. Details are in install_log.txt.")
     }
-    & $vpy -c "import ramai.server, ramai.app; print('RAM AI modules OK')"
-    if ($LASTEXITCODE -ne 0) { Fail "RAM AI was installed but does not start (import check failed)." "Send install_log.txt to whoever shared RAM AI." }
+    $code = Invoke-Native $vpy @('-c', 'import ramai.server, ramai.app; print(''RAM AI modules OK'')') 5
+    if ($code -ne 0) { Fail "RAM AI was installed but does not start (import check failed)." "Send install_log.txt to whoever shared RAM AI." }
 
     # ------------------------------------------------------------ 2b. `ramai` terminal command on the user's PATH
     Step "Adding the 'ramai' command"
@@ -91,11 +101,13 @@ try {
 
     # ------------------------------------------------------------ 3. Agent workspace (Excel/Word/PowerPoint/data libraries)
     Step "Setting up the agent's Python workspace"
-    $ws = Join-Path $Data 'workspace\.venv'
-    New-Item -ItemType Directory -Force -Path (Split-Path $ws) | Out-Null
-    if (-not (Test-Path (Join-Path $ws 'Scripts\python.exe'))) { & $py -m venv $ws }
-    & (Join-Path $ws 'Scripts\python.exe') -m pip install -r (Join-Path $Root 'requirements-workspace.txt') --prefer-binary -q --disable-pip-version-check 2>&1 | Select-Object -Last 5 | Out-Host
-    if ($LASTEXITCODE -ne 0) { Write-Warning "Workspace packages did not fully install; RAM AI will retry when it first needs them." }
+    try {   # optional: never let this step stop the install
+        $ws = Join-Path $Data 'workspace\.venv'
+        New-Item -ItemType Directory -Force -Path (Split-Path $ws) | Out-Null
+        if (-not (Test-Path (Join-Path $ws 'Scripts\python.exe'))) { $null = Invoke-Native $py @('-m', 'venv', $ws) 5 }
+        $code = Invoke-Native (Join-Path $ws 'Scripts\python.exe') @('-m', 'pip', 'install', '-r', (Join-Path $Root 'requirements-workspace.txt'), '--prefer-binary', '-q', '--disable-pip-version-check') 5
+        if ($code -ne 0) { Write-Warning "Workspace packages did not fully install; RAM AI will retry when it first needs them." }
+    } catch { Write-Warning "Workspace setup skipped ($($_.Exception.Message)); RAM AI will retry when it first needs it." }
 
     # ------------------------------------------------------------ 4. Shortcuts
     $pyw = Join-Path $venv 'Scripts\pythonw.exe'

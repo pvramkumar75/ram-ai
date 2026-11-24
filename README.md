@@ -38,7 +38,7 @@ Open a **new** terminal after installing so `ramai` is on your PATH.
 - **Outlook** ("mail"; desktop app, else the web): search and summarise mail, write and send email with attachments (approval first).
 - **WhatsApp** ("message"/"msg"; desktop app, else WhatsApp Web): find a chat, send formatted messages.
 - **Short names**: say "mail KVR" or "message Suresh" - initials, first names, nicknames and the part of an address before @ are matched to the right person. If several match, the one you interact with most is picked and shown on the approval card. Every confirmed send teaches RAM AI that short form.
-- **Voice**: click 🎤 (or Ctrl+M) and speak your task; Indian English by default, Hindi/Telugu/Tamil and more in Settings. Terminal: `ramai voice`.
+- **Voice**: HOLD 🎤 (or Ctrl+M) while you speak, let go to send; Indian English by default, Hindi/Telugu/Tamil and more in Settings. Terminal: `ramai voice`.
 - **Take control mid-task**: just use your mouse/keyboard to fix something - RAM AI pauses, waits until you stop, looks at the screen again and carries on. Or press 🖐 Take control (Ctrl+Alt+P) and Resume when done.
 - **Scheduling**: "every weekday at 9:00 ask ChatGPT for copper prices and WhatsApp them to me". Runs while RAM AI is open; it can start with Windows.
 - **Documents**: create and edit Excel, Word and PowerPoint; Power BI guidance; read PDF/DOCX/XLSX/CSV/PPTX.

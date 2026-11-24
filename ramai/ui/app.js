@@ -354,46 +354,70 @@ $("#takectl").onclick = () => setTakeover(!$("#takectl").classList.contains("on"
 $("#tkresume").onclick = () => setTakeover(false);
 setInterval(() => { if (activeTasks().length || !$("#tkbar").hidden || $("#takectl").classList.contains("on")) pollTakeover(); }, 1000);
 
-// ---------------------------------------------------------------- voice input (Edge speech recognition, Windows speech as fallback)
-const voice = { rec: null, on: false, base: "" };
-function micUI(on) { voice.on = on; $("#mic").classList.toggle("on", on); $("#instr").classList.toggle("listening", on); $("#mic").textContent = on ? "■" : "🎤"; }
-function voiceDone(text) {
-  micUI(false);
-  const v = $("#instr").value.trim();
-  if (v && S?.settings?.voice_autosend) $("#form").requestSubmit(); else if (v) $("#instr").focus();
-  else if (text !== undefined) toast("I didn't catch that - try again, a little closer to the microphone.");
-}
-async function voiceServer() {   // Windows' own recognizer (needs 'Online speech recognition' on)
+// ---------------------------------------------------------------- voice input: HOLD 🎤 (or Ctrl+M) while you speak, let go to send
+// Edge speech recognition (no Windows setting needed); Windows speech as a fallback.
+const voice = { rec: null, held: false, via: "", base: "", finalText: "", interim: "", failed: false, t0: 0 };
+function micUI(on) { $("#mic").classList.toggle("on", on); $("#instr").classList.toggle("listening", on); $("#mic").textContent = on ? "● REC" : "🎤"; }
+function showVoiceText() { $("#instr").value = (voice.base + " " + voice.finalText + voice.interim).replace(/\s+/g, " ").trim(); }
+async function voiceServer() {   // Windows' own recognizer: one sentence, then sends
   micUI(true); toast("Listening… (Windows speech)", 6000);
-  try { const r = await api("/voice/listen", "POST", { lang: S?.settings?.voice_lang }); $("#instr").value = (voice.base + " " + r.text).trim(); voiceDone(r.text); }
+  try { const r = await api("/voice/listen", "POST", { lang: S?.settings?.voice_lang }); micUI(false); $("#instr").value = (voice.base + " " + r.text).trim(); if (r.text) $("#form").requestSubmit(); }
   catch (e) { micUI(false); toast(e.message, 9000); }
 }
-function startVoice() {
+function makeRec() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  voice.base = $("#instr").value.trim();
-  if (!SR) return voiceServer();
-  const r = new SR(); voice.rec = r;
+  const r = new SR();
   r.lang = S?.settings?.voice_lang || "en-IN"; r.continuous = true; r.interimResults = true;
-  let finalText = "", silence;
-  const arm = () => { clearTimeout(silence); silence = setTimeout(() => { try { r.stop(); } catch { } }, 2200); };
-  r.onstart = () => { micUI(true); arm(); };
   r.onresult = e => {
     let interim = "";
-    for (let i = e.resultIndex; i < e.results.length; i++) { const t = e.results[i][0].transcript; if (e.results[i].isFinal) finalText += t + " "; else interim += t; }
-    $("#instr").value = (voice.base + " " + finalText + interim).replace(/\s+/g, " ").trim(); arm();
+    for (let i = e.resultIndex; i < e.results.length; i++) { const t = e.results[i][0].transcript; if (e.results[i].isFinal) voice.finalText += t + " "; else interim += t; }
+    voice.interim = interim; showVoiceText();
   };
   r.onerror = e => {
-    clearTimeout(silence); micUI(false); voice.rec = null;
-    if (e.error === "not-allowed" || e.error === "service-not-allowed") toast("Microphone blocked. Allow it for RAM AI (the lock/camera icon in the window's address area) and in Windows Settings > Privacy > Microphone.", 9000);
-    else if (e.error === "network") voiceServer();
-    else if (e.error !== "no-speech" && e.error !== "aborted") toast("Voice input error: " + e.error, 5000);
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") { voice.failed = true; toast("Microphone blocked. Allow it for RAM AI (Edge asks once) and in Windows Settings > Privacy > Microphone.", 9000); }
+    else if (e.error === "network") { voice.failed = "network"; }
+    else if (e.error !== "no-speech" && e.error !== "aborted") toast("Voice input: " + e.error, 4000);
   };
-  r.onend = () => { clearTimeout(silence); if (voice.rec === r) { voice.rec = null; voiceDone(finalText); } };
-  try { r.start(); } catch (x) { voiceServer(); }
+  r.onend = () => {
+    if (voice.rec !== r) return;
+    if (voice.held && !voice.failed) {          // Edge ends a session after a pause or ~1 min: keep listening while the button is held
+      if (voice.interim) { voice.finalText += voice.interim + " "; voice.interim = ""; }
+      try { voice.rec = makeRec(); voice.rec.start(); return; } catch { }
+    }
+    voice.rec = null; finishVoice();
+  };
+  return r;
 }
-function toggleVoice() { if (voice.on) { try { voice.rec?.stop(); } catch { } if (!voice.rec) micUI(false); } else startVoice(); }
-$("#mic").onclick = toggleVoice;
-document.addEventListener("keydown", e => { if (e.ctrlKey && !e.altKey && (e.key === "m" || e.key === "M")) { e.preventDefault(); toggleVoice(); } });
+function startHold(via) {
+  if (voice.held || voice.rec) return;
+  Object.assign(voice, { held: true, via, base: $("#instr").value.trim(), finalText: "", interim: "", failed: false, t0: Date.now() });
+  micUI(true);
+  if (!(window.SpeechRecognition || window.webkitSpeechRecognition)) { voice.held = false; return voiceServer(); }
+  try { voice.rec = makeRec(); voice.rec.start(); } catch { voice.held = false; voice.rec = null; voiceServer(); }
+}
+function endHold() {
+  if (!voice.held) return;
+  voice.held = false;
+  setTimeout(() => { try { voice.rec ? voice.rec.stop() : finishVoice(); } catch { finishVoice(); } }, 400);  // don't cut off the last word
+}
+function finishVoice() {
+  micUI(false);
+  if (voice.interim) { voice.finalText += voice.interim; voice.interim = ""; }
+  showVoiceText();
+  if (voice.failed === "network") { voice.failed = false; return voiceServer(); }
+  if (!voice.finalText.trim()) {
+    toast(Date.now() - voice.t0 < 800 ? "Hold the 🎤 button (or Ctrl+M) while you speak, and let go to send." : "I didn't catch that - hold the button and speak a little closer to the microphone.", 5000);
+    return;
+  }
+  if ($("#instr").value.trim()) $("#form").requestSubmit();
+}
+const micBtn = $("#mic");
+micBtn.addEventListener("pointerdown", e => { if (e.button !== 0) return; e.preventDefault(); try { micBtn.setPointerCapture(e.pointerId); } catch { } startHold("pointer"); });
+for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) micBtn.addEventListener(ev, () => { if (voice.via === "pointer") endHold(); });
+micBtn.addEventListener("contextmenu", e => e.preventDefault());
+document.addEventListener("keydown", e => { if (e.ctrlKey && !e.altKey && (e.key === "m" || e.key === "M")) { e.preventDefault(); if (!e.repeat) startHold("key"); } });
+document.addEventListener("keyup", e => { if (voice.via === "key" && voice.held && (e.key === "m" || e.key === "M" || e.key === "Control")) endHold(); });
+window.addEventListener("blur", () => endHold());
 $("#instr").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#form").requestSubmit(); } });
 document.querySelectorAll(".hint-row").forEach(h => h.onclick = () => { $("#instr").value = h.dataset.q; $("#instr").focus(); });
 $("#stop").onclick = async () => {
@@ -580,8 +604,8 @@ async function renderSettings() {
   <section><h3>General</h3><div class="row"><input id="g-user" value="${esc(s.user_name || "")}" placeholder="Your name"><button id="g-usave">Save my name</button></div>
     <div class="row"><input id="g-name" value="${esc(s.device_name)}"><button id="g-save">Rename this PC</button></div>
     <div class="row"><label class="muted" style="flex:0 0 auto">🎤 Voice language</label><select id="g-vlang">${[["en-IN", "English (India)"], ["en-US", "English (US)"], ["en-GB", "English (UK)"], ["hi-IN", "Hindi"], ["te-IN", "Telugu"], ["ta-IN", "Tamil"], ["kn-IN", "Kannada"], ["ml-IN", "Malayalam"], ["mr-IN", "Marathi"], ["bn-IN", "Bengali"], ["gu-IN", "Gujarati"]].map(([v, n]) => `<option value="${v}" ${v === (s.voice_lang || "en-IN") ? "selected" : ""}>${n}</option>`).join("")}</select>
-      <label class="tog" style="flex:0 0 auto"><input type="checkbox" id="g-vauto" ${s.voice_autosend ? "checked" : ""}> Send as soon as I stop speaking</label></div>
-    <p class="muted">Version ${esc(S.version)} · Emergency stop: Ctrl+Alt+Q · Take control: Ctrl+Alt+P · Voice: Ctrl+M · Retention: ${esc(s.retention_days)} days</p></section>`;
+      <span class="muted small" style="flex:0 0 auto">Hold 🎤 (or Ctrl+M) while you speak, let go to send</span></div>
+    <p class="muted">Version ${esc(S.version)} · Emergency stop: Ctrl+Alt+Q · Take control: Ctrl+Alt+P · Voice: hold Ctrl+M · Retention: ${esc(s.retention_days)} days</p></section>`;
   const out = (id, ok, m) => { const o = $(id); o.className = "msg " + (ok ? "ok" : "err"); o.textContent = m; };
   const guard = fn => async () => { try { await fn(); } catch (e) { toast(e.message, 5000); } };
   const secretOf = { deepseek: "deepseek", openai: "openai", sarvam: "sarvam", local: "local_llm", custom: "custom_llm" };
@@ -630,7 +654,6 @@ async function renderSettings() {
   $("#g-usave").onclick = guard(async () => { await api("/settings", "POST", { user_name: $("#g-user").value.trim() }); toast("Saved"); });
   $("#g-save").onclick = guard(async () => { await api("/settings", "POST", { device_name: $("#g-name").value }); renderSettings(); });
   $("#g-vlang").onchange = guard(async () => { await api("/settings", "POST", { voice_lang: $("#g-vlang").value }); S.settings.voice_lang = $("#g-vlang").value; toast("Voice language saved"); });
-  $("#g-vauto").onchange = guard(async () => { await api("/settings", "POST", { voice_autosend: $("#g-vauto").checked }); S.settings.voice_autosend = $("#g-vauto").checked; toast("Saved"); });
   const mem = await api("/memory");
   $("#mem").innerHTML = mem.map(m => `<div class="row"><span>${esc(m.key)} = ${esc(m.value)}</span><button class="ghost" data-mk="${esc(m.key)}">Delete</button></div>`).join("") || '<p class="muted">Empty.</p>';
   el.querySelectorAll("[data-mk]").forEach(b => b.onclick = guard(async () => { await api("/memory/" + encodeURIComponent(b.dataset.mk), "DELETE"); renderSettings(); }));
