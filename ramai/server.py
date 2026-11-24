@@ -133,7 +133,7 @@ def create_api(app: App, token: str | None = None, port: int = 8765) -> FastAPI:
         if pid not in PROVIDERS:
             raise HTTPException(400, "Unknown provider")
         if body.get("model"):
-            app.settings.set(PROVIDERS[pid]["model"], str(body["model"])[:120])
+            app.deepseek.use_model(pid, str(body["model"])[:400])
         app.settings.set("llm_provider", pid)
         app.db.audit(None, app.device_name, "llm_selected", None, {"provider": pid, "model": app.deepseek.model(pid)})
         return {"provider": pid, "model": app.deepseek.model(pid), "ready": app.deepseek.ready(pid)}

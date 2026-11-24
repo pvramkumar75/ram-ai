@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import re
 from typing import Any
 
 import httpx
@@ -97,8 +98,26 @@ class LLM:
             return {"api-subscription-key": key, "Authorization": f"Bearer {key}"}
         return {"Authorization": f"Bearer {key}"}
 
+    def models(self, pid=None) -> list[str]:
+        """The model box may list several models ('deepseek-flash, deepseek-v4-pro'): the FIRST is used, the others
+        can be picked from the selector at the top. One name is ever sent to the provider."""
+        out: list[str] = []
+        for m in re.split(r"[,;\s]+", str(self.settings.get(self._cfg(pid)["model"]) or "")):
+            if m and m not in out:
+                out.append(m)
+        return out
+
     def model(self, pid=None) -> str:
-        return self.settings.get(self._cfg(pid)["model"]) or ""
+        ms = self.models(pid)
+        return ms[0] if ms else ""
+
+    def use_model(self, pid: str, model: str) -> None:
+        """Make `model` the one in use (kept first); the other listed models stay available."""
+        new = [m for m in re.split(r"[,;\s]+", model or "") if m]
+        if len(new) == 1:
+            new += [m for m in self.models(pid) if m != new[0]]
+        if new:
+            self.settings.set(self._cfg(pid)["model"], ", ".join(new)[:400])
 
     def ready(self, pid=None) -> bool:
         c = self._cfg(pid)
@@ -109,7 +128,8 @@ class LLM:
         return bool(self.model(pid)) or c["needs_key"]  # cloud providers pick a model on first test
 
     def providers_status(self) -> list[dict]:
-        return [{"id": pid, "label": self.label(pid), "model": self.model(pid), "base_url": self._base(pid),
+        return [{"id": pid, "label": self.label(pid), "model": self.model(pid), "models": self.models(pid),
+                 "models_text": ", ".join(self.models(pid)), "base_url": self._base(pid),
                  "key_set": self.secrets.has(c["secret"]), "needs_key": c["needs_key"], "ready": self.ready(pid),
                  "active": pid == self.provider()} for pid, c in PROVIDERS.items()]
 

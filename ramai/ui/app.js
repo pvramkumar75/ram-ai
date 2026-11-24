@@ -155,10 +155,18 @@ $("#device").onchange = () => { loadDevices(); winlog.length = 0; renderWinlog()
 async function loadModelSwitch() {
   try {
     const st = await api("/status"); const sel = $("#llm");
-    sel.innerHTML = st.settings.llm_providers.map(p => `<option value="${esc(p.id)}" ${p.active ? "selected" : ""} ${p.ready ? "" : "disabled"}>✦ ${esc(p.label)}${p.model ? " · " + esc(p.model) : ""}${p.ready ? "" : " (not set up)"}</option>`).join("");
+    // one entry per provider, or one per model when several models are listed for it (the first is in use)
+    sel.innerHTML = st.settings.llm_providers.map(p => {
+      const ms = p.ready && (p.models || []).length > 1 ? p.models : [p.model];
+      return ms.map((m, i) => `<option value="${esc(p.id + "|" + (m || ""))}" ${p.active && i === 0 ? "selected" : ""} ${p.ready ? "" : "disabled"}>✦ ${esc(p.label)}${m ? " · " + esc(m) : ""}${p.ready ? "" : " (not set up)"}</option>`).join("");
+    }).join("");
   } catch { }
 }
-$("#llm").onchange = async () => { try { const r = await api("/llm/select", "POST", { provider: $("#llm").value }); toast("AI model: " + r.model); } catch (e) { toast(e.message); } loadModelSwitch(); };
+$("#llm").onchange = async () => {
+  const [provider, model] = $("#llm").value.split("|");
+  try { const r = await api("/llm/select", "POST", { provider, model: model || undefined }); toast("AI model: " + r.model); } catch (e) { toast(e.message); }
+  loadModelSwitch();
+};
 
 // ================================================================ RIGHT PANE: conversation timeline
 const tasks = new Map();   // id -> {id, instruction, device, remote, events[], lastId, state, result, error, thinking_since, el}
@@ -566,7 +574,7 @@ async function renderSettings() {
     ${s.llm_providers.map(p => `<div class="prov ${p.active ? "on" : ""}" data-p="${esc(p.id)}">
       <div class="row"><b>${esc(p.label)}</b>${p.active ? '<span class="pill on">in use</span>' : ""}<span class="muted">${p.ready ? "ready" : (p.needs_key && !p.key_set ? "needs API key" : "not set up")}</span></div>
       ${p.id === "custom" ? `<div class="row"><input class="p-label" placeholder="Name shown in the app" value="${esc(s.custom_label)}"></div>` : ""}
-      <div class="row"><input class="p-url" placeholder="Base URL (OpenAI-compatible)" value="${esc(p.base_url)}"><input class="p-model" list="ml-${esc(p.id)}" placeholder="Model name, e.g. ${p.id === "openai" ? "gpt-6-luna" : p.id === "deepseek" ? "deepseek-chat" : p.id === "sarvam" ? "deepseekv4.1-flash-1017" : "model"}" value="${esc(p.model)}"><datalist id="ml-${esc(p.id)}"></datalist></div>
+      <div class="row"><input class="p-url" placeholder="Base URL (OpenAI-compatible)" value="${esc(p.base_url)}"><input class="p-model" list="ml-${esc(p.id)}" title="One model, or several separated by commas: the first is used, switch between them at the top" placeholder="Model, e.g. ${p.id === "openai" ? "gpt-6-luna" : p.id === "deepseek" ? "deepseek-flash, deepseek-v4-pro" : p.id === "sarvam" ? "deepseekv4.1-flash-1017" : "model"} (several: comma-separated)" value="${esc(p.models_text || p.model)}"><datalist id="ml-${esc(p.id)}"></datalist></div>
       <div class="row"><input class="p-key" type="password" placeholder="${p.key_set ? "•••••• key saved (type a new one to replace)" : (p.needs_key ? "API key" : "API key (optional)")}">
         <button class="p-save">Save</button><button class="ghost p-test">Test &amp; list models</button><button class="ghost p-use">Use this</button>${p.key_set ? '<button class="ghost p-del">Delete key</button>' : ""}</div>
       <div class="msg p-out"></div></div>`).join("")}
@@ -627,7 +635,7 @@ async function renderSettings() {
       if (!r.ok) { msg(false, r.error); return; }
       q("datalist").innerHTML = r.models.map(m => `<option value="${esc(m)}">`).join("");
       if (!q(".p-model").value && r.models.length) q(".p-model").value = r.models[0];
-      msg(true, `Connected. ${r.models.length} model(s) available${r.hint ? " — " + r.hint : ""}. Pick one in the model box, then Save / Use this.`);
+      msg(true, `Connected. ${r.models.length} model(s) available${r.hint ? " — " + r.hint : ""}. Pick one in the model box (or list several, comma-separated, to switch between them at the top), then Save / Use this.`);
     });
     q(".p-use").onclick = guard(async () => { await save(); const r = await api("/llm/select", "POST", { provider: pid, model: q(".p-model").value.trim() }); toast(r.ready ? "Now using " + pid + " · " + r.model : "Selected, but not ready yet (key/model missing)"); renderSettings(); loadModelSwitch(); });
     if (q(".p-del")) q(".p-del").onclick = guard(async () => { await api("/secrets/" + secretOf[pid], "DELETE"); renderSettings(); loadModelSwitch(); });
