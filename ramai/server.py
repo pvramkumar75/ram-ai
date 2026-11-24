@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import re
 import secrets as pysecrets
 import threading
 from pathlib import Path
@@ -316,6 +317,77 @@ def create_api(app: App, token: str | None = None, port: int = 8765) -> FastAPI:
         """on=true: 'Take control' - the agent pauses before its next screen action until on=false (Resume)."""
         app.takeover.set_paused(bool(body.get("on")))
         return {"paused": app.takeover.paused}
+
+    # ------------------------------------------------------------ Teach mode: record the user doing a task -> skill
+    @api.get("/api/teach")
+    async def teach_status():
+        return app.teach.status()
+
+    @api.post("/api/teach/start")
+    async def teach_start():
+        import asyncio as _asyncio
+
+        try:
+            return await _asyncio.to_thread(app.teach.start)
+        except RuntimeError as e:
+            raise HTTPException(409, str(e))
+
+    @api.post("/api/teach/stop")
+    async def teach_stop():
+        import asyncio as _asyncio
+
+        from .teach import public_steps
+
+        steps = await _asyncio.to_thread(app.teach.stop)
+        return {"steps": public_steps(steps), "stopped_reason": app.teach.stopped_reason}
+
+    @api.post("/api/teach/discard")
+    async def teach_discard():
+        app.teach.discard()
+        return {"ok": True}
+
+    @api.post("/api/teach/draft")
+    async def teach_draft(body: dict = Body(...)):
+        """Send ONLY the steps the user kept to the AI, which writes the skill for the user to check."""
+        from .teach import clean_draft, draft_prompt, slug, to_text
+
+        title = str(body.get("title") or "").strip()[:80]
+        if len(title) < 3:
+            raise HTTPException(400, "Give the task a name first (e.g. 'MB51 stock report').")
+        steps = app.teach.steps
+        keep = {int(i) for i in body.get("keep") or [] if str(i).isdigit() and int(i) < len(steps)}
+        if not keep:
+            raise HTTPException(400, "No steps kept. Record the task again, or tick the steps to use.")
+        desc = str(body.get("description") or "").strip()[:600]
+        text = to_text(steps, keep)
+        try:
+            msg = await app.llm.chat(draft_prompt(title, desc, text), temperature=0.2)
+        except ProviderError as e:
+            raise HTTPException(502, str(e))
+        content = clean_draft(msg.get("content") or "")
+        if len(content) < 40:
+            raise HTTPException(502, "The AI returned an empty skill. Try again.")
+        return {"name": slug(title), "description": (desc or title)[:200], "content": content, "recording": text}
+
+    @api.post("/api/teach/save")
+    async def teach_save(body: dict = Body(...)):
+        from .teach import slug
+        from .tools.skills import user_dir
+
+        name = slug(str(body.get("name") or ""))
+        desc = re.sub(r"\s+", " ", str(body.get("description") or "")).strip()[:200]
+        content = str(body.get("content") or "").strip()[:30000]
+        recording = str(body.get("recording") or "").strip()[:20000]
+        if len(desc) < 3 or len(content) < 40:
+            raise HTTPException(400, "Name, description and skill text are needed.")
+        p = user_dir() / f"{name}.md"
+        if p.exists() and not body.get("overwrite"):
+            raise HTTPException(409, f"A skill called '{name}' already exists. Tick 'Replace' or choose another name.")
+        rec = f"\n\n## Recorded demonstration (for reference)\n```\n{recording}\n```\n" if recording else "\n"
+        p.write_text(f"---\nname: {name}\ndescription: {desc}\ntaught: yes\n---\n{content}{rec}", encoding="utf-8")
+        app.db.audit(None, app.device_name, "skill_saved", None, {"name": name, "taught": True})
+        app.teach.steps = []
+        return {"saved": name, "path": str(p)}
 
     @api.post("/api/voice/listen")
     async def voice_listen(body: dict = Body(default={})):

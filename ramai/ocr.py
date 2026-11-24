@@ -85,10 +85,14 @@ def read_region(left: int, top: int, right: int, bottom: int, scale: float = 1.0
     """OCR a screen rectangle (screen coordinates). Returns text lines with screen-coordinate boxes."""
     import mss
 
+    with mss.mss() as sct:
+        shot = sct.grab({"left": left, "top": top, "width": max(1, right - left), "height": max(1, bottom - top)})
+    return read_image(Image.frombytes("RGB", shot.size, shot.rgb), left, top, scale)
+
+
+def read_image(img: Image.Image, left: int = 0, top: int = 0, scale: float = 1.0) -> list[Line]:
+    """OCR an image that was captured earlier at screen position (left, top)."""
     with _lock:
-        with mss.mss() as sct:
-            shot = sct.grab({"left": left, "top": top, "width": max(1, right - left), "height": max(1, bottom - top)})
-        img = Image.frombytes("RGB", shot.size, shot.rgb)
         if scale != 1.0:
             img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
         res = _run(_recognize(img))

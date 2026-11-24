@@ -500,6 +500,12 @@ def test_schedule_allows_only_approved_recipients():
     assert not schedule_allows("whatsapp_send_message", {"contact": "Ravi"}, allowed)
     assert not schedule_allows("delete_file", {"path": "x"}, allowed)
     assert not schedule_allows("send_email", {"to": ["a@b.com"]}, [])
+    # WhatsApp: the chat the preview really opened decides, not how the AI spelled the name
+    me = ["@myself"]
+    assert schedule_allows("whatsapp_send_message", {"contact": "myself"}, me, chat="@myself (You)")
+    assert schedule_allows("whatsapp_send_message", {"contact": "@myself"}, me)
+    assert not schedule_allows("whatsapp_send_message", {"contact": "Ravi"}, ["Ravi"], chat="Ravi Shankar Sales")
+    assert not schedule_allows("whatsapp_send_message", {"contact": "@myself"}, me, chat="Suresh Rao")
 
 
 @pytest.mark.asyncio

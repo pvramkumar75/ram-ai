@@ -37,8 +37,15 @@ def _norm_rcpt(x: str) -> str:
     return re.sub(r"\s+", " ", (x or "").strip().lower())
 
 
-def schedule_allows(name: str, args: dict, allowed: list[str]) -> bool:
-    """Standing approval of a schedule: only sends to recipients the user approved when creating it."""
+def _chat_key(x: str) -> str:
+    """WhatsApp chat name for comparing: '@me (You)' == '@me' == 'me'."""
+    return re.sub(r"\s*\(you\)$", "", _norm_rcpt(x)).lstrip("@").strip()
+
+
+def schedule_allows(name: str, args: dict, allowed: list[str], chat: str | None = None) -> bool:
+    """Standing approval of a schedule: only sends to recipients the user approved when creating it.
+    chat: for WhatsApp, the chat the message will REALLY go to (opened and checked by the preview). When known, only it
+    counts, so a short name that resolves to someone else is never auto-sent."""
     ok = {_norm_rcpt(a) for a in allowed if a}
     if not ok:
         return False
@@ -46,7 +53,8 @@ def schedule_allows(name: str, args: dict, allowed: list[str]) -> bool:
         rc = [*(args.get("to") or []), *(args.get("cc") or [])]
         return bool(rc) and all(_norm_rcpt(r) in ok for r in rc)
     if name in ("whatsapp_send_message", "whatsapp_send_prepared"):
-        return _norm_rcpt(args.get("contact", "")) in ok
+        keys = {_chat_key(a) for a in ok}
+        return _chat_key(chat if chat else args.get("contact", "")) in keys
     return False
 
 
@@ -214,7 +222,10 @@ class Executor:
                     text, digest = pv["text"], pv.get("digest")
                 ah = args_hash(name, adict)
                 suffix = "\nReversible: " + ("yes" if tool.reversible else "NO — cannot be undone") + f"\nPerformed on: {ctx.device}"
-                if ctx.schedule and not ctx.approve_all and schedule_allows(name, adict, ctx.schedule.get("allowed", [])):
+                chat = None
+                if name.startswith("whatsapp_send") and tool.preview:
+                    chat = ((getattr(app, "whatsapp", None) and app.whatsapp.prepared) or {}).get("chat")
+                if ctx.schedule and not ctx.approve_all and schedule_allows(name, adict, ctx.schedule.get("allowed", []), chat):
                     db.audit(ctx.task_id, ctx.device, "auto_approved", name, {"by": f"schedule '{ctx.schedule.get('title')}' (recipient approved when scheduled)", "details": text[:1500]})
                     res = {"status": "approved", "hash": ah}
                 elif ctx.approve_all and name not in NEVER_AUTO:
@@ -420,6 +431,11 @@ CODE, TERMINAL & SKILLS:
 - Every script/command/install is shown to the user for approval unless the task is authorised/pre-approved; write it so it is safe to
   read: clear, minimal, no hidden side effects, never deletes user files unless asked.
 - After solving a new kind of task well, you may propose save_skill(name, description, content) so it is done better next time.
+- TAUGHT skills were recorded from the user doing the task once. When a request matches one, load_skill it FIRST and follow its
+  Steps in order, filling its {{placeholders}} from the request (ask_user for any input that is missing; never guess numbers).
+  Find each control by its name/visible text (ui_click, click_text); the "% across/down" positions are only hints. If the screen
+  differs from the steps, look again (read_screen_text / ui_elements) and adapt instead of clicking blindly. If a step needs a
+  password, ask the user to type it.
 - Available skills:
 {skills}
 
@@ -501,7 +517,7 @@ class Orchestrator:
         roots = [f"{r['path']} ({'read/write' if r.get('write') else 'read-only'})" for r in self.app.policy.roots()]
         from .tools.skills import skills_brief
 
-        return SYSTEM.replace("{skills}", skills_brief()).format(user=self.app.settings.get("user_name") or __import__("os").environ.get("USERNAME", "the user"), device=self.app.device_name, today=dt.datetime.now().strftime("%A %d %B %Y, %H:%M local time"),
+        return SYSTEM.replace("{skills}", skills_brief().replace("{", "{{").replace("}", "}}")).format(user=self.app.settings.get("user_name") or __import__("os").environ.get("USERNAME", "the user"), device=self.app.device_name, today=dt.datetime.now().strftime("%A %d %B %Y, %H:%M local time"),
                              roots="; ".join(roots) or "none yet", memory=json.dumps(mem) if mem else "none") + (
             "\nAUTHORISATION GRANTED BY THE USER FOR THIS TASK: you may read/write any folder (Desktop, Documents, drives) "
             "using absolute paths, and every action runs without approval prompts. Do the task directly; do not ask for permission again. "

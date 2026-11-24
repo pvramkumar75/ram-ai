@@ -44,7 +44,8 @@ def all_skills() -> list[dict]:
 
 
 def skills_brief() -> str:
-    return "\n".join(f"- {s['name']}: {s['description']}" for s in all_skills()) or "(none)"
+    return "\n".join(f"- {s['name']}: {s['description']}" + (" (TAUGHT by the user doing it)" if s.get("taught") else "")
+                     for s in all_skills()) or "(none)"
 
 
 class LoadArgs(Args):

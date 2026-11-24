@@ -116,6 +116,9 @@ class App:
         from .dock import Dock
 
         self.dock = Dock(self)
+        from .teach import Recorder
+
+        self.teach = Recorder(self)
         try:
             self.people.bootstrap_from_audit()  # first run: learn who you already mailed / messaged through RAM AI
         except Exception:

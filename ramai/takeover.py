@@ -48,6 +48,7 @@ class Takeover:
         self._tid = 0
         self._procs = []
         self._users = 0
+        self.hooked = False
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------ hooks (only while tasks run)
@@ -66,6 +67,7 @@ class Takeover:
         u.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
         u.CallNextHookEx.restype = LRESULT
         u.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+        k.GetModuleHandleW.restype = ctypes.c_void_p  # 64-bit handle: truncated to 32 bits the hook fails (error 126)
         u.WindowFromPoint.argtypes = [wintypes.POINT]
         u.WindowFromPoint.restype = ctypes.c_void_p
         u.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
@@ -95,6 +97,7 @@ class Takeover:
         hm = u.SetWindowsHookExW(WH_MOUSE_LL, self._procs[0], k.GetModuleHandleW(None), 0)
         hk = u.SetWindowsHookExW(WH_KEYBOARD_LL, self._procs[1], k.GetModuleHandleW(None), 0)
         self._tid = k.GetCurrentThreadId()
+        self.hooked = bool(hm and hk)
         msg = wintypes.MSG()
         while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             pass

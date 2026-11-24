@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RAM AI</title>
-<link rel="stylesheet" href="style.css?v=9">
+<link rel="stylesheet" href="style.css?v=10">
 </head>
 <body>
 <header>
@@ -13,6 +13,7 @@
   <span id="devstate" class="pill">…</span>
   <select id="llm" title="Switch the AI model"></select>
   <span class="spacer"></span>
+  <button id="teach" class="ghost" title="Teach RAM AI a task: press, do the task once yourself, press Stop teaching. RAM AI turns it into a skill you check and save.">🎓 Teach</button>
   <button id="takectl" class="ghost" title="Pause the agent so you can fix something on the screen yourself (Ctrl+Alt+P). It continues when you press Resume.">🖐 Take control</button>
   <button id="stop" class="danger" title="Emergency stop (Ctrl+Alt+Q)">■ Stop</button>
   <nav>
@@ -61,6 +62,7 @@
       </div>
     </div>
     <div id="tkbar" class="tkbar" hidden><span class="tki">🖐</span><span id="tkmsg"></span><span class="spacer"></span><button id="tkresume">Resume now</button></div>
+    <div id="teachbar" class="tkbar teachbar" hidden><span class="tki">●</span><span id="teachmsg"></span><span class="spacer"></span><button id="teachstop">■ Stop teaching</button></div>
     <form id="form">
       <textarea id="instr" rows="2" placeholder="Ask RAM AI to do something…  (Enter to send, Shift+Enter for a new line)"></textarea>
       <div class="form-row">
@@ -118,7 +120,26 @@
   <button id="w-go">Save &amp; test connection</button>
 </div></div>
 
+<div id="teach-modal" class="modal hidden"><div class="card teach-card">
+  <h2>Teach RAM AI this task</h2>
+  <div id="tm-review">
+    <label>Task name<input id="tm-title" maxlength="80" placeholder="e.g. MB51 stock report for a material"></label>
+    <label>When should RAM AI use it, and what changes each time?<textarea id="tm-desc" rows="2" maxlength="600" placeholder="e.g. When I ask for MB51 movements. The material number and the date range change each time."></textarea></label>
+    <p class="muted small">These are the steps RAM AI saw. <b>Untick anything private or accidental.</b> Password fields were not recorded. Only the ticked steps are sent to the AI to write the skill.</p>
+    <div id="tm-steps"></div>
+    <div class="row"><button id="tm-write">Write the skill</button><button id="tm-discard" class="ghost">Discard</button></div>
+  </div>
+  <div id="tm-edit" class="hidden">
+    <p class="muted small">Check the skill and edit anything that is wrong. RAM AI follows these steps next time you ask for this task.</p>
+    <label>Skill name<input id="tm-name" maxlength="40"></label>
+    <textarea id="tm-content" rows="16" spellcheck="false"></textarea>
+    <label class="tog small"><input type="checkbox" id="tm-over"> Replace a skill with the same name</label>
+    <div class="row"><button id="tm-save">Save skill</button><button id="tm-back" class="ghost">Back to steps</button><button id="tm-discard2" class="ghost">Discard</button></div>
+  </div>
+  <div id="tm-msg" class="msg"></div>
+</div></div>
+
 <div id="toast"></div>
-<script src="app.js?v=9"></script>
+<script src="app.js?v=10"></script>
 </body>
 </html>

@@ -41,6 +41,7 @@ Open a **new** terminal after installing so `ramai` is on your PATH.
 - **Voice**: HOLD 🎤 (or Ctrl+M) while you speak, let go to send; Indian English by default, Hindi/Telugu/Tamil and more in Settings. Terminal: `ramai voice`.
 - **Side by side while working**: during a task RAM AI docks on the right edge of the screen (on top) and the apps it works in are kept on the left, so you always see both. Turn off in Settings > General.
 - **Take control mid-task**: just use your mouse/keyboard to fix something - RAM AI pauses, waits until you stop, looks at the screen again and carries on. Or press 🖐 Take control (Ctrl+Alt+P) and Resume when done.
+- **Teach it a task by doing it**: press 🎓 Teach, do the task once with your own mouse and keyboard, press Stop teaching. RAM AI shows the steps it saw (untick anything private; password fields are never recorded), the AI writes a skill with fill-in inputs (e.g. material number), you check and save it. Next time just ask for the task.
 - **Scheduling**: "every weekday at 9:00 ask ChatGPT for copper prices and WhatsApp them to me". Runs while RAM AI is open; it can start with Windows.
 - **Documents**: create and edit Excel, Word and PowerPoint; Power BI guidance; read PDF/DOCX/XLSX/CSV/PPTX.
 - **Code**: PowerShell/cmd and Python in an isolated workspace; installs packages when a task needs them.
