@@ -410,6 +410,12 @@ class ListArgs(Args):
                          description="Received mail lives in the Inbox and its rule subfolders; Focused/Other are both in Inbox")
     unread_only: bool = False
     sender: str | None = Field(None, max_length=100, description="Only mail whose sender name/email contains this")
+    addressed: str | None = Field(None, pattern="^(to_me|only_to_me|cc_me|to_or_cc_me)$",
+                                  description="Mail addressed to the mailbox owner (the user): to_me = user is in To; only_to_me = user is "
+                                              "the ONLY To recipient ('exclusively/directly to me'); cc_me = only copied; to_or_cc_me = either. "
+                                              "Filtered inside Outlook - fast, no need to read every mail.")
+    recipient: str | None = Field(None, max_length=100, description="Only mail whose To/Cc contains this person (name, or the user's own "
+                                                                     "address / 'me' which means addressed='to_me')")
     limit: int = Field(200, ge=1, le=500)
 
 
@@ -420,7 +426,11 @@ class ReadManyArgs(Args):
 
 async def t_list(a: ListArgs, ctx):
     if backend(ctx.app) == "com":
-        res = await asyncio.to_thread(oc.list_messages, a.since, a.until, a.folders, a.unread_only, a.sender, a.limit)
+        try:
+            res = await asyncio.to_thread(oc.list_messages, a.since, a.until, a.folders, a.unread_only, a.sender, a.limit, 300,
+                                          a.addressed, a.recipient)
+        except ValueError as e:
+            raise PolicyError(str(e))
         _learn_from_messages(ctx, res.get("messages"))
         return res
     start, end = oc.parse_since(a.since, a.until)
@@ -431,10 +441,32 @@ async def t_list(a: ListArgs, ctx):
     d = await _ol.graph(ctx, "GET", f"/me/mailFolders/{folder}/messages", params={
         "$filter": flt, "$orderby": "receivedDateTime desc", "$top": min(a.limit, 100),
         "$select": "id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview"})
+    me = ""
+    if a.addressed or (a.recipient and a.recipient.lower() in ("me", "myself", "self")):
+        u = await _ol.graph(ctx, "GET", "/me", params={"$select": "mail,userPrincipalName"})
+        me = (u.get("mail") or u.get("userPrincipalName") or "").lower()
+    addressed = a.addressed or ("to_me" if me and a.recipient and a.recipient.lower() in ("me", "myself", "self") else None)
+    other = "" if addressed and not a.addressed else (a.recipient or "").lower()
+    if other and me and other == me:
+        addressed, other = addressed or "to_me", ""
+
+    def _addrs(m, key):
+        return [((r.get("emailAddress") or {}).get("address") or "").lower() for r in m.get(key, [])]
+
+    def _names(m):
+        return " ".join(f"{(r.get('emailAddress') or {}).get('name', '')} {(r.get('emailAddress') or {}).get('address', '')}"
+                        for k in ("toRecipients", "ccRecipients") for r in m.get(k, [])).lower()
+
     msgs = []
     for m in d.get("value", []):
         fr = (m.get("from") or {}).get("emailAddress", {})
         if a.sender and a.sender.lower() not in f"{fr.get('name', '')} {fr.get('address', '')}".lower():
+            continue
+        to, cc = _addrs(m, "toRecipients"), _addrs(m, "ccRecipients")
+        if addressed == "to_me" and me not in to or addressed == "only_to_me" and to != [me] \
+                or addressed == "cc_me" and (me not in cc or me in to) or addressed == "to_or_cc_me" and me not in to + cc:
+            continue
+        if other and other not in _names(m):
             continue
         msgs.append({"id": m["id"], "received": m.get("receivedDateTime"), "from": fr.get("name"), "from_email": fr.get("address"),
                      "to": "; ".join(r["emailAddress"].get("name", "") for r in m.get("toRecipients", [])),
@@ -460,7 +492,7 @@ async def t_read_many(a: ReadManyArgs, ctx):
 def register(reg: Registry) -> None:
     R = Risk
     reg.register(Tool("send_email", "FASTEST way to email (also called mail) in ONE call: recipients may be NAMES or SHORT FORMS (KVR, Suresh, Srini) - each is resolved to the right person (if several match equally, the one you mail most) and shown on the approval card. Creates the draft, gets approval, sends. Use reply_to_message_id to reply.", SendEmailArgs, t_quick_send, R.HIGH, 150, preview=quick_send_preview, reversible=False))
-    reg.register(Tool("outlook_list_messages", "List mail by DATE (complete and current, no keywords needed): e.g. since='today'. Use for 'mails received today/yesterday/this week', unread mail, or all mail from a sender in a period.", ListArgs, t_list, R.READ, 120, untrusted=True))
+    reg.register(Tool("outlook_list_messages", "List mail by DATE (complete and current, no keywords needed): e.g. since='today'. Use for 'mails received today/yesterday/this week', unread mail, all mail from a sender, or mail addressed TO the user / to someone (addressed=, recipient=: filtered inside Outlook, so only matching mails need reading).", ListArgs, t_list, R.READ, 120, untrusted=True))
     reg.register(Tool("outlook_read_many", "Read up to 25 emails in ONE call (sender, To, Cc, cleaned body). Use after outlook_list_messages/outlook_search.", ReadManyArgs, t_read_many, R.READ, 240, untrusted=True))
     reg.register(Tool("outlook_find_person", "Find people by NAME or SHORT FORM (initials like KVR, first name, nickname) in contacts, recent mail and directory. Returns the picked person (best match; if tied, the one you mail most) and the alternatives.", FindPersonArgs, t_find_person, R.READ, 40, untrusted=True))
     reg.register(Tool("outlook_search", "Search the mailbox. Every word must match subject/sender (or body). Works by person NAME too.", SearchArgs, t_search, R.READ, 60, untrusted=True))

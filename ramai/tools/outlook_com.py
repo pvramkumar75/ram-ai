@@ -419,8 +419,44 @@ def _summary(m, fname: str, preview: int) -> dict:
             "preview": clean_body(body, preview) if body else "(body not available - protected or not downloaded)"}
 
 
+TO_ME_TAG = "http://schemas.microsoft.com/mapi/proptag/0x0057000B"   # PR_MESSAGE_TO_ME: mailbox owner is in To
+CC_ME_TAG = "http://schemas.microsoft.com/mapi/proptag/0x0058000B"   # PR_MESSAGE_CC_ME: mailbox owner is in Cc
+ADDRESSED = {  # Outlook's own "To me / CC me" flags: filtered inside the store, prompt-free, ~0.04 s
+    "to_me": f'"{TO_ME_TAG}" = 1',
+    "only_to_me": f'"{TO_ME_TAG}" = 1 AND NOT ("urn:schemas:httpmail:displayto" LIKE \'%;%\')',
+    "cc_me": f'"{CC_ME_TAG}" = 1 AND "{TO_ME_TAG}" = 0',
+    "to_or_cc_me": f'("{TO_ME_TAG}" = 1 OR "{CC_ME_TAG}" = 1)',
+}
+YOU_ARE = {"to_me": "in To", "only_to_me": "the only To recipient", "cc_me": "in Cc (not To)", "to_or_cc_me": "in To or Cc"}
+
+
+def mailbox_address(ns) -> str:
+    try:
+        return str(ns.DefaultStore.DisplayName or "").strip()
+    except Exception:
+        return ""
+
+
+def recipient_filters(addressed: str | None, recipient: str | None, owner: str) -> tuple[list[str], str | None, str]:
+    """DASL filters for 'mail addressed to ...'. The mailbox owner's own address (or 'me') becomes the To-me flag, because
+    Outlook keeps display NAMES (not addresses) in To/Cc for filtering. Returns (filters, addressed used, other recipient)."""
+    flts, rc = [], (recipient or "").strip()
+    if rc and (rc.lower() in ("me", "myself", "self") or (owner and rc.lower() == owner.lower())):
+        addressed, rc = addressed or "to_me", ""
+    if addressed:
+        if addressed not in ADDRESSED:
+            raise ValueError(f"addressed must be one of {sorted(ADDRESSED)}")
+        flts.append(ADDRESSED[addressed])
+    if rc:
+        q = rc.split("@")[0] if "@" in rc else rc   # an address: match the name part people usually show in To
+        q = q.replace("'", "''")
+        flts.append(f'("urn:schemas:httpmail:displayto" LIKE \'%{q}%\' OR "urn:schemas:httpmail:displaycc" LIKE \'%{q}%\')')
+    return flts, addressed, rc
+
+
 def list_messages(since: str = "today", until: str | None = None, folders: str = "inbox_and_subfolders",
-                  unread_only: bool = False, sender: str | None = None, limit: int = 100, preview: int = 300) -> dict:
+                  unread_only: bool = False, sender: str | None = None, limit: int = 100, preview: int = 300,
+                  addressed: str | None = None, recipient: str | None = None) -> dict:
     start, end = parse_since(since, until)
     sender_l = (sender or "").lower().strip()
     out: list[dict] = []
@@ -429,13 +465,21 @@ def list_messages(since: str = "today", until: str | None = None, folders: str =
     with com() as ol:
         ns = ol.GetNamespace("MAPI")
         safe = not is_trusted(ol)
+        owner = mailbox_address(ns)
+        rflts, addressed, other = recipient_filters(addressed, recipient, owner)
         for f in _folders(ns, folders):
             try:
                 items = f.Items
+                try:  # narrow to the period first (the loop below still checks every time exactly)
+                    items = items.Restrict(f"[ReceivedTime] >= '{start:%m/%d/%Y %H:%M}'")
+                except Exception:
+                    pass
                 if sender_l:  # filter by sender inside Outlook's store (no guarded property reads)
                     sq = sender_l.replace("'", "''")
                     items = items.Restrict('@SQL=("urn:schemas:httpmail:fromname" LIKE ' + "'%" + sq + "%'" +
                                            ' OR "urn:schemas:httpmail:fromemail" LIKE ' + "'%" + sq + "%')")
+                for rf in rflts:  # chained filters are fast; one big OR/AND filter is slow
+                    items = items.Restrict("@SQL=" + rf)
                 items.Sort("[ReceivedTime]", True)  # newest first: stop as soon as we pass the start time
                 fname = f.Name
             except Exception:
@@ -464,9 +508,14 @@ def list_messages(since: str = "today", until: str | None = None, folders: str =
             if len(out) >= limit:
                 break
     out.sort(key=lambda x: x["received"], reverse=True)
-    return {"window": f"{start:%Y-%m-%d %H:%M} to {(end or _dt.datetime.now()):%Y-%m-%d %H:%M} (local time)",
-            "mode": "prompt-free (subjects/times only; call outlook_read_many for sender, recipients, body)" if safe else "full",
-            "count": len(out), "truncated": len(out) >= limit, "folders": scanned_folders[:30], "messages": out}
+    res = {"window": f"{start:%Y-%m-%d %H:%M} to {(end or _dt.datetime.now()):%Y-%m-%d %H:%M} (local time)",
+           "mode": "prompt-free (subjects/times only; call outlook_read_many for sender, recipients, body)" if safe else "full",
+           "mailbox": owner, "count": len(out), "truncated": len(out) >= limit, "folders": scanned_folders[:30], "messages": out}
+    parts = ([f"the mailbox owner ({owner or 'you'}) is {YOU_ARE[addressed]}"] if addressed else []) + \
+            ([f"To/Cc names contain '{other}'"] if other else [])
+    if parts:
+        res["filter"] = " and ".join(parts)
+    return res
 
 
 def read_many(ids: list[str], max_chars: int = 1500) -> list[dict]:
