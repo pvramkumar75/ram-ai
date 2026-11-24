@@ -118,6 +118,7 @@ setInterval(async () => { try { for (const r of (await api("/tasks")).slice(0, 5
 async function loadStatus() {
   try { S = await api("/status"); tokenBad = false; }
   catch (e) { if (!tokenBad) { tokenBad = true; showSystem("Cannot reach the agent (" + e.message + "). Close this window and re-open RAM AI from Start_RAM_AI.bat."); } return; }
+  if (S.version) { $("#ver").textContent = "v" + S.version; }
   if (!S.configured) $("#wizard").classList.remove("hidden");
 }
 function showSystem(text) { const d = document.createElement("div"); d.className = "final err"; d.textContent = text; $("#ap-misc").appendChild(d); }

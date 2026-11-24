@@ -137,3 +137,4 @@ main#view-sched{flex:1;overflow:auto;padding:16px}
 
 /* docked beside the work (narrow): the real screen is right next to us, so show only steps + approvals */
 @media (max-width:700px){#screen-pane{display:none}#work-pane{flex:1 1 auto}main.split{flex-direction:column}#tabs,nav .tab{font-size:12.5px}.hint-row{font-size:12.5px}}
+.ver{font-size:11.5px;font-weight:500;color:var(--mut);border:1px solid var(--bd);border-radius:99px;padding:1px 8px;margin-left:4px;vertical-align:2px}
