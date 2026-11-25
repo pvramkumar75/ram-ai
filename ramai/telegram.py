@@ -19,7 +19,7 @@ from .core import redact
 from .policy import PolicyError
 
 API = "https://api.telegram.org"
-TERMINAL = {"Completed", "Failed", "Cancelled"}
+TERMINAL = {"Completed", "Failed", "Cancelled", "Incomplete"}
 STALE = 600                       # a message older than this was sent while RAM AI was off: never run it late
 CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
@@ -158,6 +158,7 @@ class Telegram:
         self.save(chat_id=0, who="")
         self.pairing = None
         self.tracked.clear()
+        self.save(tracked=[])
         self.audit("telegram_unpaired")
 
     def disconnect(self) -> None:
@@ -166,13 +167,24 @@ class Telegram:
         self.save(enabled=False, chat_id=0, who="", bot="", bot_id=0, offset=0)
         self.pairing, self.connected, self.error = None, False, ""
         self.tracked.clear()
+        self.save(tracked=[])
         self.shown.clear()
         self.audit("telegram_disconnected")
+
+    def follow(self, tid: str) -> None:
+        self.tracked[tid] = time.time()
+        self.save(tracked=list(self.tracked))
+
+    def unfollow(self, tid: str) -> None:
+        self.tracked.pop(tid, None)
+        self.save(tracked=list(self.tracked))
 
     def start(self) -> None:
         c = self.cfg()
         if not (c.get("enabled") and self.token()) or (self.task and not self.task.done()):
             return
+        for tid in c.get("tracked") or []:       # tasks that were running when RAM AI last stopped: tell the phone how they ended
+            self.tracked.setdefault(tid, time.time())
         self.task = asyncio.get_running_loop().create_task(self._main())
 
     def stop(self) -> None:
@@ -283,7 +295,7 @@ class Telegram:
             aid = next((a for a, s in self.shown.items() if s["mid"] == rt.get("message_id") and s["kind"] == "question"), None)
             if aid:
                 try:
-                    self.app.approvals.decide(aid, "approve", text[:2000], "once")
+                    self.app.approvals.decide(aid, "approve", text[:2000], "once", "phone")
                     self.shown.pop(aid, None)
                     await self.send(chat, "👍 Answer sent.")
                 except ValueError:
@@ -321,10 +333,21 @@ class Telegram:
         if not app.configured():
             await self.send(chat, "RAM AI is not fully set up on the PC yet (it needs a device name and an AI key).")
             return
-        tid = app.orchestrator.create(text[:4000], app.device_name)
-        self.tracked[tid] = time.time()
+        text = text[:4000]
+        dup = app.orchestrator.find_running(text)
+        if dup:
+            self.follow(dup)
+            await self.send(chat, f"That exact request is already running ({dup[:4]}), so I did not start it twice. I'll message you when it finishes.")
+            return
+        from .engine import is_grant
+
+        note = ""
+        if is_grant(text):    # 'authorization granted' would switch every approval off: that is only ever given on the PC
+            note = "\n(Blanket authorization is not accepted from the phone: I'll ask you to approve each sensitive step here.)"
+        tid = app.orchestrator.create(text, app.device_name, allow_grant=False)
+        self.follow(tid)
         self.audit("task_from_telegram", {"instruction": text[:300]}, tid)
-        await self.send(chat, f"▶ On it ({tid[:4]}). I'll message you when it is done or when I need your OK.")
+        await self.send(chat, f"▶ On it ({tid[:4]}). I'll message you when it is done or when I need your OK." + note)
 
     async def _callback(self, cb: dict, chat: int) -> None:
         data = str(cb.get("data") or "")
@@ -338,7 +361,7 @@ class Telegram:
                 note = "Not allowed for this action."
             else:
                 try:
-                    self.app.approvals.decide(aid, "reject" if kind == "an" else "approve", None, "task" if kind == "at" else "once")
+                    self.app.approvals.decide(aid, "reject" if kind == "an" else "approve", None, "task" if kind == "at" else "once", "phone")
                     note = "Declined" if kind == "an" else ("Approved for this task" if kind == "at" else "Approved")
                 except ValueError:
                     note = "No longer waiting"
@@ -351,6 +374,8 @@ class Telegram:
         sh = self.shown.get(aid)
         if sh and note in ("Declined", "Approved", "Approved for this task", "No longer waiting"):
             await self._finish_msg(chat, aid, ("✅ " if note.startswith("Approved") else "🚫 " if note == "Declined" else "") + note)
+        if note == "Declined":
+            await self.send(chat, "Understood, nothing was sent. If you want it changed, just send me the new wording or instruction.")
 
     def _phone_may(self, row: dict) -> bool:
         return row.get("risk") != "high" or self.cfg().get("phone_high_risk", True) is not False
@@ -384,7 +409,7 @@ class Telegram:
 
     def _tasks_text(self) -> str:
         rows = self.app.db.query("SELECT instruction,state FROM tasks ORDER BY created DESC LIMIT 6")
-        icon = {"Completed": "✅", "Failed": "❌", "Cancelled": "⏹"}
+        icon = {"Completed": "✅", "Failed": "❌", "Cancelled": "⏹", "Incomplete": "⚠"}
         return "\n".join(f"{icon.get(r['state'], '▶')} {r['state']}: {r['instruction'][:70]}" for r in rows) or "No tasks yet."
 
     async def watch_once(self) -> None:
@@ -395,12 +420,13 @@ class Telegram:
         for tid in list(self.tracked):
             row = db.one("SELECT state,result,error FROM tasks WHERE id=?", (tid,))
             if not row:
-                self.tracked.pop(tid, None)
+                self.unfollow(tid)
             elif row["state"] in TERMINAL:
                 body = {"Completed": "✅ Done.\n\n" + (row["result"] or ""), "Failed": "❌ Could not finish.\n\n" + (row["error"] or ""),
+                        "Incomplete": "⚠ NOT fully done.\n\n" + (row["result"] or row["error"] or ""),
                         "Cancelled": "⏹ Cancelled."}[row["state"]]
                 await self.send(chat, body.strip())           # only forgotten once it really went out
-                self.tracked.pop(tid, None)
+                self.unfollow(tid)
         pend = self.app.approvals.pending()
         ids = {a["id"] for a in pend}
         for a in pend:
@@ -425,9 +451,10 @@ class Telegram:
             if on_pc:
                 mid = await self.send(chat, text + "\n\nApprove or decline this one on the PC.")
             else:
-                rows = [[{"text": "✅ Approve", "callback_data": f"ay:{a['id']}"}, {"text": "🚫 Decline", "callback_data": f"an:{a['id']}"}]]
+                rows = [[{"text": "✅ Approve", "callback_data": f"ay:{a['id']}"}]]
                 if a["tool"] not in NO_PHONE_ALL:
                     rows.append([{"text": "✅ Approve all for this task", "callback_data": f"at:{a['id']}"}])
+                rows.append([{"text": "🚫 Decline (nothing will be sent)", "callback_data": f"an:{a['id']}"}])   # on its own row: no mistap beside Approve
                 mid = await self.send(chat, text, {"inline_keyboard": rows})
         self.shown[a["id"]] = {"mid": mid, "text": text, "kind": a["kind"]}
 

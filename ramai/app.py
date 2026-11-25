@@ -16,7 +16,7 @@ from .tools import apps, chatai, code, computer, docs, files, outlook, outlook_t
 from .tools.base import Registry
 from . import remote
 
-TERMINAL = {"Completed", "Failed", "Cancelled"}
+TERMINAL = {"Completed", "Failed", "Cancelled", "Incomplete"}
 
 
 class Indicator:

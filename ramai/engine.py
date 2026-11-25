@@ -67,6 +67,34 @@ MAX_TOOL_OUTPUT = 45000  # mail lists / batch reads are large; the model's conte
 APPROVAL_TIMEOUT = 600
 # actions that always ask, even when the user approved the whole task
 NEVER_AUTO = {"pair_device"}
+# tools that move the mouse/keyboard or read the live screen: only ONE task may use the screen at a time
+SCREEN_TOOLS = {"focus_window", "launch_app", "ui_elements", "ui_click", "ui_type", "click_text", "read_screen_text", "copy_window_text",
+                "ask_chatgpt", "open_url"}
+SCREEN_WAIT = 240          # seconds a task waits for the screen before telling the user it is busy
+HARD_STEP_CAP = 300        # a task this long is stuck: stop and report instead of running (and costing) forever
+KEEP_FULL = 14             # newest tool results kept in full when the history gets long
+HISTORY_LIMIT = 220_000    # characters of history before older tool results are shortened (keeps every step fast)
+
+
+def family(name: str) -> str:
+    """Tools that do the same job share a family: a failure or a success of one speaks for the others."""
+    return "whatsapp" if name.startswith("whatsapp_") else ("email" if name in ("send_email", "send_email_draft") else name)
+
+
+def compact_messages(messages: list[dict]) -> int:
+    """Long tasks pile up big tool outputs; every step then re-sends all of it (slow, costly, eventually over the model's
+    limit). Keep the newest results whole and shorten the older ones. Returns how many were shortened."""
+    total = sum(len(m.get("content") or "") for m in messages)
+    if total <= HISTORY_LIMIT:
+        return 0
+    tools = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    n = 0
+    for i in tools[:-KEEP_FULL]:
+        c = messages[i].get("content") or ""
+        if len(c) > 700:
+            messages[i]["content"] = c[:600] + "\n…[older result shortened to keep the task fast; call the tool again if you need it]"
+            n += 1
+    return n
 
 
 def args_hash(tool: str, args: dict) -> str:
@@ -120,7 +148,8 @@ class ApprovalManager:
         self.app.db.exec("UPDATE approvals SET status=?,answer=?,decided=? WHERE id=? AND status='pending'",
                          (status, answer, time.time(), aid))
 
-    def decide(self, aid: str, decision: str, answer: str | None = None, scope: str = "once") -> dict:
+    def decide(self, aid: str, decision: str, answer: str | None = None, scope: str = "once", source: str = "pc") -> dict:
+        """source: where the user decided ('pc', 'phone', 'peer') - kept in the audit log."""
         if decision not in ("approve", "reject"):
             raise ValueError("decision must be approve or reject")
         with self._lock:
@@ -130,7 +159,7 @@ class ApprovalManager:
             raise ValueError("Approval is not pending (expired, already decided, or unknown)")
         status = "approved" if decision == "approve" else "rejected"
         self._finish(aid, status, answer)
-        self.app.db.audit(p["task_id"], self.app.device_name, f"{row['kind']}_{status}", row["tool"], {"id": aid, "answer": answer})
+        self.app.db.audit(p["task_id"], self.app.device_name, f"{row['kind']}_{status}", row["tool"], {"id": aid, "answer": answer, "via": source})
         if scope == "task" and status == "approved" and row["kind"] == "approval" and row["tool"] not in NEVER_AUTO:
             item = self.app.orchestrator.running.get(p["task_id"])
             if item:
@@ -185,11 +214,71 @@ class Executor:
             return json.dumps({"ok": False, "error": f"Invalid arguments: {str(e)[:600]}"}), False
         if ctx.stopped():
             return json.dumps({"ok": False, "error": "Stopped by user"}), False
+        if family(name) in ctx.scratch.get("off", set()):
+            return json.dumps({"ok": False, "error": f"'{family(name)}' tools are switched off for the rest of this task because they failed "
+                               "the same way three times. Do not try them again or work around them with clicks. Finish by telling the "
+                               "user plainly what was done, what failed (with the error) and what was NOT done."}), False
         elev_token = ELEVATED.set(ctx.elevated)  # copied into worker threads by asyncio.to_thread
         try:
-            return await self._execute(ctx, name, tool, args)
+            text, ok = await self._execute(ctx, name, tool, args)
         finally:
             ELEVATED.reset(elev_token)
+        if not ok:
+            text = self._repeated_failure(ctx, name, text)
+        return text, ok
+
+    def _repeated_failure(self, ctx, name: str, text: str) -> str:
+        """The same failure again and again is never fixed by trying a fourth way: warn on the 2nd, switch the tool family off on the 3rd."""
+        try:
+            err = str(json.loads(text).get("error", ""))
+        except Exception:
+            return text
+        if not err or err.startswith(("User ", "Stopped by user", "Approval mismatch")) or "paused_for_user" in text:
+            return text
+        key = family(name) + "|" + re.sub(r"\d+", "#", re.sub(r"'[^']*'", "''", err.lower()))[:80]
+        counts = ctx.scratch.setdefault("errs", {})
+        counts[key] = counts.get(key, 0) + 1
+        if counts[key] == 2:
+            text += ("\n[RAM AI] The same error happened twice. Do NOT work around it with manual clicking, opening panels or other apps. "
+                     "Try at most one genuinely different approach; otherwise stop and tell the user exactly what failed and what was not done.")
+        elif counts[key] >= 3:
+            ctx.scratch.setdefault("off", set()).add(family(name))
+            self.app.db.audit(ctx.task_id, ctx.device, "tool_family_off", name, {"error": err[:300]})
+            text += f"\n[RAM AI] '{family(name)}' tools are now switched off for this task. Finish by reporting plainly what was done, what failed and what was not done."
+        return text
+
+    # ---- one task at a time on the screen (mouse, keyboard, focus): two tasks driving it together wreck each other's work
+    def _needs_screen(self, tool, name: str) -> bool:
+        return bool(tool.control or name in SCREEN_TOOLS or name.startswith("whatsapp_"))
+
+    async def _screen(self, ctx, tool, name: str) -> str | None:
+        """Take the screen for this task (waiting while another task has it). Returns an error text if it stays busy."""
+        if ctx.scratch.get("screen") or not self._needs_screen(tool, name):
+            return None
+        lock = self.app.orchestrator.screen_lock
+        if lock.locked():
+            self.app.db.audit(ctx.task_id, ctx.device, "thought", None, {"text": "Another task is using the screen right now - waiting for it to finish."})
+            self._set_state(ctx, "Waiting for the screen")
+        try:
+            await asyncio.wait_for(lock.acquire(), SCREEN_WAIT)
+        except asyncio.TimeoutError:
+            self._set_state(ctx, "Running")
+            return "The screen is busy with another task. Tell the user it is waiting, or try again in a minute."
+        ctx.scratch["screen"] = True
+        self._set_state(ctx, "Running")
+        return None
+
+    def release_screen(self, ctx) -> None:
+        if ctx.scratch.pop("screen", None):
+            self.app.orchestrator.screen_lock.release()
+
+    def _note_blocked(self, ctx, name: str, why: str | None) -> None:
+        """Remember a send/delete-type action that did NOT happen, so the task is never reported as plainly 'done'."""
+        b = ctx.scratch.setdefault("blocked", {})
+        if why:
+            b[family(name)] = why
+        else:
+            b.pop(family(name), None)
 
     async def _execute(self, ctx, name, tool, args) -> tuple[str, bool]:
         app, db = self.app, self.app.db
@@ -199,12 +288,16 @@ class Executor:
                 tool.check(args, ctx)
             risk = tool.risk_for(args)
             adict = args.model_dump()
+            busy = await self._screen(ctx, tool, name)
+            if busy:
+                return json.dumps({"ok": False, "error": busy}), False
             # a one-time approval for each computer-control session (visual clicks cannot be classified semantically)
             if tool.control and not ctx.control_approved and ctx.approve_all:
                 ctx.control_approved = True
                 db.audit(ctx.task_id, ctx.device, "auto_approved", "control_session", {"by": "task approval"})
             if tool.control and not ctx.control_approved:
                 self._set_state(ctx, "Awaiting approval")
+                self.release_screen(ctx)      # another task may use the screen while this one waits for the user
                 res = await app.approvals.request(
                     ctx, "approval", "control_session", args_hash("control_session", {"device": ctx.device}),
                     f"Allow RAM AI to control the mouse and keyboard on {ctx.device} for this task.\n"
@@ -214,6 +307,9 @@ class Executor:
                 if res["status"] != "approved":
                     return json.dumps({"ok": False, "error": "User declined computer control"}), False
                 ctx.control_approved = True
+                busy = await self._screen(ctx, tool, name)
+                if busy:
+                    return json.dumps({"ok": False, "error": busy}), False
             ctx.approved_digest = None
             if risk == Risk.HIGH:
                 text, digest = f"ACTION: {name}\n" + "\n".join(f"  {k}: {str(v)[:1200]}" for k, v in adict.items()), None
@@ -233,14 +329,25 @@ class Executor:
                     res = {"status": "approved", "hash": ah}
                 else:
                     self._set_state(ctx, "Awaiting approval")
+                    self.release_screen(ctx)      # another task may use the screen while this one waits for the user
                     res = await app.approvals.request(ctx, "approval", name, ah, text + suffix, "high")
                     self._set_state(ctx, "Running")
                 if res["status"] != "approved":
                     db.audit(ctx.task_id, ctx.device, "tool_not_approved", name, {"status": res["status"]})
-                    return json.dumps({"ok": False, "error": f"User {res['status']} this action. Do not retry it."}), False
+                    self._note_blocked(ctx, name, f"you {res['status']} it")
+                    if name.startswith("whatsapp_send") and getattr(app, "whatsapp", None):
+                        try:   # take the unsent draft out of the chat box, so it is not left there for the next attempt
+                            if not await self._screen(ctx, tool, name):
+                                await app.whatsapp.discard_draft()
+                        except Exception:
+                            pass
+                    return json.dumps({"ok": False, "error": f"User {res['status']} this action. Do not retry it. Nothing was sent."}), False
                 if res["hash"] != ah or ctx.stopped():  # approval is bound to the exact args
                     return json.dumps({"ok": False, "error": "Approval mismatch or stopped"}), False
                 ctx.approved_digest = digest
+                busy = await self._screen(ctx, tool, name)
+                if busy:
+                    return json.dumps({"ok": False, "error": busy}), False
             tk = getattr(app, "takeover", None)
             if tk and (tool.control or name in TAKEOVER_TOOLS) and await tk.gate(ctx, name):
                 if ctx.stopped():
@@ -260,12 +367,16 @@ class Executor:
                 if risk == Risk.HIGH:
                     msg += " The outcome is UNCERTAIN: inspect state and ask the user before any retry. Never resend automatically."
                 db.audit(ctx.task_id, ctx.device, "tool_timeout", name)
+                if risk == Risk.HIGH:
+                    self._note_blocked(ctx, name, "it timed out and may not have happened")
                 return json.dumps({"ok": False, "error": msg}), False
             finally:
                 if tool.control:
                     app.indicator.hide()
                 if tk:
                     tk.mark()  # input from now until the next step is the user's
+            if risk == Risk.HIGH:
+                self._note_blocked(ctx, name, None)   # it really ran
             db.audit(ctx.task_id, ctx.device, "tool_result", name, {"ms": int((time.time() - t0) * 1000), "result": out})
             payload = {"ok": True, "result": out}
             text = wrap_untrusted(payload) if tool.untrusted else json.dumps(payload, default=str, ensure_ascii=False)
@@ -274,6 +385,8 @@ class Executor:
             return text, True
         except PolicyError as e:
             db.audit(ctx.task_id, ctx.device, "tool_denied", name, {"reason": str(e)})
+            if risk == Risk.HIGH:
+                self._note_blocked(ctx, name, str(e)[:200])
             return json.dumps({"ok": False, "error": str(e)}), False
         except ProviderError as e:
             return json.dumps({"ok": False, "error": str(e)}), False
@@ -282,6 +395,7 @@ class Executor:
             msg = f"{type(e).__name__}: {redact(str(e))[:400]}"
             if risk == Risk.HIGH:
                 msg +=" (outcome uncertain: verify before retrying; never auto-resend)"
+                self._note_blocked(ctx, name, msg[:200])
             return json.dumps({"ok": False, "error": msg}), False
 
     def _set_state(self, ctx: ToolContext, state: str) -> None:
@@ -464,20 +578,39 @@ class Orchestrator:
     def __init__(self, app):
         self.app = app
         self.running: dict[str, tuple[asyncio.Task, ToolContext]] = {}
+        self.screen_lock = asyncio.Lock()   # who may drive the mouse / keyboard / window focus right now
+
+    def find_running(self, instruction: str) -> str | None:
+        """A task with exactly this instruction that is still working (and not a schedule): sending the same request twice
+        - a double tap, an impatient resend - must never run the same actions twice."""
+        want = " ".join((instruction or "").split()).lower()
+        for tid in self.running:
+            row = self.app.db.one("SELECT instruction,state FROM tasks WHERE id=?", (tid,))
+            if row and row["state"] not in ("Completed", "Failed", "Cancelled", "Incomplete") \
+                    and " ".join((row["instruction"] or "").split()).lower() == want and not row["instruction"].startswith("[Scheduled"):
+                return tid
+        return None
 
     def recover(self) -> None:
         self.app.db.exec("UPDATE tasks SET state='Failed',error='Interrupted by restart; sensitive actions are never replayed',updated=? "
-                         "WHERE state IN ('Planning','Running','Awaiting approval','Paused')", (time.time(),))
+                         "WHERE state IN ('Planning','Running','Awaiting approval','Paused','Waiting for the screen')", (time.time(),))
         self.app.db.exec("UPDATE approvals SET status='expired' WHERE status='pending'")
 
-    def create(self, instruction: str, device: str | None = None, pre_approve: bool = False, schedule: dict | None = None) -> str:  # noqa: C901
+    def create(self, instruction: str, device: str | None = None, pre_approve: bool = False, schedule: dict | None = None,  # noqa: C901
+               allow_grant: bool = True) -> str:
+        """allow_grant=False: a phrase like 'authorization granted' in the text does NOT lift approvals (used for the phone)."""
+        if not schedule:
+            dup = self.find_running(instruction)
+            if dup:
+                self.app.db.audit(dup, device or self.app.device_name, "duplicate_request_ignored", None, {"instruction": instruction[:200]})
+                return dup
         tid = uuid.uuid4().hex[:10]
         device = device or self.app.device_name
         now = time.time()
         self.app.db.exec("INSERT INTO tasks(id,instruction,device,state,created,updated) VALUES(?,?,?,?,?,?)",
                          (tid, instruction, device, "Planning", now, now))
         self.app.db.audit(tid, device, "task_created", None, {"instruction": instruction})
-        granted = is_grant(instruction)
+        granted = allow_grant and is_grant(instruction)
         ctx = ToolContext(self.app, tid, device, approve_all=pre_approve or granted, elevated=granted,
                           control_approved=granted or bool(schedule), schedule=schedule)
         if schedule:
@@ -555,6 +688,7 @@ class Orchestrator:
         messages.append({"role": "user", "content": instruction})
         acted = 0          # tool calls that actually did something in THIS task
         pushed_back = False
+        nudged = False
         try:
             last_fail: dict[str, int] = {}
             limit = user_step_limit(instruction)  # only a limit the user asked for
@@ -565,8 +699,18 @@ class Orchestrator:
                     app.db.exec("UPDATE tasks SET state='Failed',error=?,updated=? WHERE id=?",
                                 (f"Stopped after the {limit} steps you allowed", time.time(), tid))
                     return
+                if step > HARD_STEP_CAP:
+                    app.db.exec("UPDATE tasks SET state='Incomplete',result=?,updated=? WHERE id=?",
+                                (f"I stopped after {HARD_STEP_CAP} steps because the task was not converging. {acted} actions were taken; "
+                                 "see the steps above for how far it got. Tell me which part to continue with.", time.time(), tid))
+                    app.db.audit(tid, ctx.device, "task_incomplete", None, {"reason": "step cap"})
+                    return
+                if step in (100, 200):
+                    app.db.audit(tid, ctx.device, "thought", None, {"text": f"This is a long task ({step} steps so far). Keeping going; will stop at {HARD_STEP_CAP}."})
                 if ctx.stopped():
                     raise asyncio.CancelledError()
+                if compact_messages(messages):
+                    app.db.audit(tid, ctx.device, "history_shortened", None, {"messages": len(messages)})
                 app.thinking[tid] = time.time()
                 try:
                     msg = await app.deepseek.chat(messages, reg.specs())
@@ -577,7 +721,13 @@ class Orchestrator:
                 if calls and thought:
                     app.db.audit(tid, ctx.device, "thought", None, {"text": thought[:2500], "secs": round(time.time() - (started or time.time()), 1)})
                 if not calls:
-                    final = msg.get("content") or "(no response)"
+                    final = (msg.get("content") or "").strip()
+                    if not final and not nudged:  # an empty reply is never a result: ask once for the outcome in words
+                        nudged = True
+                        messages.append({"role": "user", "content": "[RAM AI] Your last reply was empty. Reply now with the result for the user: "
+                                         "what was done, what the outcome is, and anything that was NOT done."})
+                        continue
+                    final = final or "(no response)"
                     if not acted and not pushed_back and (ctx.schedule or CLAIMS_DONE.search(final)):
                         # a report of actions with zero tool calls is not true: make it do the work (once)
                         pushed_back = True
@@ -588,8 +738,13 @@ class Orchestrator:
                                          "results. Carry out the request now using the tools; if it needs nothing done, say plainly that "
                                          "you took no action."})
                         continue
-                    app.db.exec("UPDATE tasks SET state='Completed',result=?,updated=? WHERE id=?", (final, time.time(), tid))
-                    app.db.audit(tid, ctx.device, "task_completed", None, {"result": final[:500]})
+                    blocked = ctx.scratch.get("blocked") or {}
+                    if blocked:   # a send / delete / save did not happen: never call that plainly 'done'
+                        app.db.exec("UPDATE tasks SET state='Incomplete',result=?,updated=? WHERE id=?", (final, time.time(), tid))
+                        app.db.audit(tid, ctx.device, "task_incomplete", None, {"not_done": blocked, "result": final[:500]})
+                    else:
+                        app.db.exec("UPDATE tasks SET state='Completed',result=?,updated=? WHERE id=?", (final, time.time(), tid))
+                        app.db.audit(tid, ctx.device, "task_completed", None, {"result": final[:500]})
                     return
                 messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
                 app.set_task_state(tid, "Running")
@@ -637,6 +792,7 @@ class Orchestrator:
             app.db.audit(tid, ctx.device, "task_failed", None, {"error": f"{type(e).__name__}: {e}"})
         finally:
             self.running.pop(tid, None)
+            app.executor.release_screen(ctx)   # the screen is free for the next task
             app.indicator.hide()
             if tk:
                 tk.disarm()

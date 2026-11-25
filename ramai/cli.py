@@ -166,12 +166,16 @@ def follow(h, tid: str) -> int:
             if ap.get("task_id") == tid and ap["id"] not in seen_ap:
                 seen_ap.add(ap["id"])
                 handle_approval(h, ap)
-        if r["state"] in ("Completed", "Failed", "Cancelled"):
+        if r["state"] in ("Completed", "Failed", "Cancelled", "Incomplete"):
             print()
             if r["state"] == "Completed":
                 say("◆ RAM AI", "b")
                 print(render(r.get("result") or "", color=bool(C["b"])), flush=True)
                 return 0
+            if r["state"] == "Incomplete":
+                say("⚠ NOT fully done", "y")
+                print(render(r.get("result") or r.get("error") or "", color=bool(C["b"])), flush=True)
+                return 1
             say(f"{r['state']}: {r.get('error') or ''}", "r")
             return 1
         time.sleep(0.6)
@@ -230,7 +234,7 @@ def cmd_status(args) -> int:
     say(f"RAM AI {s['version']} · running · {s['device']} · user {se.get('user_name') or '-'}", "b")
     say(f"AI model: {s['llm']['label']} · {s['llm']['model']}   (set up: {'yes' if s['configured'] else 'NO - run: ramai open'})")
     say(f"Folders it may read: {len(se.get('roots', []))} · web: {'on' if se.get('web_access', True) else 'off'} · tools: {len(s['tools'])}")
-    act = [t for t in api(h, "GET", "/tasks")[:10] if t["state"] not in ("Completed", "Failed", "Cancelled")]
+    act = [t for t in api(h, "GET", "/tasks")[:10] if t["state"] not in ("Completed", "Failed", "Cancelled", "Incomplete")]
     say(f"Running tasks: {len(act)}" + "".join(f"\n  - {t['id']} {t['state']}: {t['instruction'][:70]}" for t in act))
     return 0
 
@@ -245,7 +249,7 @@ def cmd_stop(args) -> int:
 def cmd_history(args) -> int:
     h = connect(False)
     for t in api(h, "GET", "/tasks")[: args.n]:
-        col = {"Completed": "g", "Failed": "r", "Cancelled": "y"}.get(t["state"], "c")
+        col = {"Completed": "g", "Failed": "r", "Cancelled": "y", "Incomplete": "y"}.get(t["state"], "c")
         say(f"{time.strftime('%d %b %H:%M', time.localtime(t['created']))}  {t['state']:<10}  {t['instruction'][:80]}", col)
     return 0
 

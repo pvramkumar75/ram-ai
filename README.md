@@ -42,6 +42,7 @@ Open a **new** terminal after installing so `ramai` is on your PATH.
 - **Side by side while working**: during a task RAM AI docks on the right edge of the screen (on top) and the apps it works in are kept on the left, so you always see both. Turn off in Settings > General.
 - **Take control mid-task**: just use your mouse/keyboard to fix something - RAM AI pauses, waits until you stop, looks at the screen again and carries on. Or press 🖐 Take control (Ctrl+Alt+P) and Resume when done.
 - **Phone**: command RAM AI from your phone through your own private Telegram bot (Settings > Phone). Type a task, get the result back, tap Approve or Decline for sensitive actions. Nothing is opened on your PC; only the one phone you pair can use it.
+- **Honest results**: a task whose send/delete/save did not happen is shown as "NOT fully done" (never a plain "Done"), the same request is never run twice at once, repeating failures stop quickly with a clear report, only one task drives the screen at a time, and WhatsApp chats are read with who said what.
 - **Scheduling**: "every weekday at 9:00 ask ChatGPT for copper prices and WhatsApp them to me". Runs while RAM AI is open; it can start with Windows.
 - **Documents**: create and edit Excel, Word and PowerPoint; Power BI guidance; read PDF/DOCX/XLSX/CSV/PPTX.
 - **Code**: PowerShell/cmd and Python in an isolated workspace; installs packages when a task needs them.

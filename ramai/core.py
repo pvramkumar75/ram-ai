@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "RAM AI"
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 
 def data_dir() -> Path:
@@ -165,7 +165,7 @@ DEFAULTS: dict[str, Any] = {
     "remote": {"enabled": False, "bind": "", "port": 8766, "allow_screenshot": False},
     # phone control through your own Telegram bot (the bot token itself lives in the encrypted secret store)
     "telegram": {"enabled": False, "bot": "", "bot_id": 0, "chat_id": 0, "who": "", "offset": 0,
-                 "allow_screenshot": False, "phone_high_risk": True},
+                 "allow_screenshot": False, "phone_high_risk": True, "tracked": []},
     "max_steps": 40,
     "web_access": True,
     "outlook_backend": "auto",  # auto | com | graph

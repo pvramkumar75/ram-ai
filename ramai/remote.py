@@ -209,7 +209,7 @@ def build_remote_app(app) -> FastAPI:
             return {"cancelled": on_main(app, lambda: app.orchestrator.cancel(str(p.get("id"))))}
         if m == "decide_approval":
             try:
-                return app.approvals.decide(str(p.get("id")), str(p.get("decision")), p.get("answer"), str(p.get("scope", "once")))
+                return app.approvals.decide(str(p.get("id")), str(p.get("decision")), p.get("answer"), str(p.get("scope", "once")), "peer")
             except ValueError as e:
                 raise HTTPException(409, str(e))
         if m == "screenshot":

@@ -109,7 +109,8 @@ async def test_overwrite_needs_approval_reject_then_approve(app, tmp_path):
     assert ap[0]["tool"] == "write_text_file" and str(target) in ap[0]["summary"]
     assert target.read_text() == "old"  # nothing happened before approval
     app.approvals.decide(ap[0]["id"], "reject")
-    await wait_for(lambda: app.db.one("SELECT state FROM tasks WHERE id=?", (tid,))["state"] == "Completed")
+    # the overwrite the user declined did not happen, so the task must NOT be reported as plainly done
+    await wait_for(lambda: app.db.one("SELECT state FROM tasks WHERE id=?", (tid,))["state"] == "Incomplete")
     assert target.read_text() == "old"
 
     target.write_text("old")
@@ -151,7 +152,7 @@ async def test_prompt_injection_cannot_bypass_approval(app, docs, tmp_path):
     tool_msg = [m for m in ds.calls[1] if m["role"] == "tool"][0]["content"]
     assert "EXTERNAL_DATA_START" in tool_msg  # content delivered as untrusted data
     app.approvals.decide(ap[0]["id"], "reject")
-    await wait_for(lambda: app.db.one("SELECT state FROM tasks WHERE id=?", (tid,))["state"] == "Completed")
+    await wait_for(lambda: app.db.one("SELECT state FROM tasks WHERE id=?", (tid,))["state"] == "Incomplete")
     assert victim.exists()
 
 
@@ -519,7 +520,7 @@ async def test_scheduled_run_sends_only_to_approved(app, tmp_path):
     ap = await wait_for(lambda: app.approvals.pending())
     assert ap[0]["tool"] == "delete_file" and victim.exists()
     app.approvals.decide(ap[0]["id"], "reject")
-    await wait_for(lambda: app.db.one("SELECT state FROM tasks WHERE id=?", (tid,))["state"] == "Completed")
+    await wait_for(lambda: app.db.one("SELECT state FROM tasks WHERE id=?", (tid,))["state"] == "Incomplete")
 
 
 def test_schedule_crud_and_tick(app):

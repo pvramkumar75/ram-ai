@@ -150,11 +150,11 @@ async def test_approval_buttons_decide_the_real_approval(tg, app, monkeypatch):
     await paired(tg, app)
     await seed_approval(app)
     decided = []
-    monkeypatch.setattr(app.approvals, "decide", lambda aid, d, a=None, s="once": decided.append((aid, d, s)) or {"status": d})
+    monkeypatch.setattr(app.approvals, "decide", lambda aid, d, a=None, s="once", src="pc": decided.append((aid, d, s)) or {"status": d})
     await tg.watch_once()
     sent = tg.fake.sent()[-1]
     buttons = [b["callback_data"] for row in sent["reply_markup"]["inline_keyboard"] for b in row]
-    assert "SEND EMAIL" in sent["text"] and buttons == ["ay:ap1", "an:ap1", "at:ap1"]
+    assert "SEND EMAIL" in sent["text"] and buttons == ["ay:ap1", "at:ap1", "an:ap1"]   # Decline sits on its own row
     await tg.watch_once()
     assert len(tg.fake.sent()) == 1                                           # not asked twice
     await tg.handle({"update_id": 1, "callback_query": {"id": "c1", "from": {"id": 666}, "data": "ay:ap1"}})
@@ -171,7 +171,7 @@ async def test_high_risk_can_be_kept_for_the_pc_and_pairing_never_goes_to_the_ph
     await seed_approval(app, "ap2", tool="pair_device", risk="high")
     await seed_approval(app, "ap3", tool="list_windows", risk="low")
     decided = []
-    monkeypatch.setattr(app.approvals, "decide", lambda aid, d, a=None, s="once": decided.append(aid) or {"status": d})
+    monkeypatch.setattr(app.approvals, "decide", lambda aid, d, a=None, s="once", src="pc": decided.append(aid) or {"status": d})
     await tg.watch_once()
     by = {b["text"].split("\n")[2][:10]: b for b in tg.fake.sent()}
     assert all("reply_markup" not in b for b in tg.fake.sent() if "SEND EMAIL" in b["text"] and "PC" in b["text"])
@@ -186,7 +186,7 @@ async def test_questions_are_answered_by_replying(tg, app, monkeypatch):
     await paired(tg, app)
     await seed_approval(app, "q1", kind="question", tool="ask_user", risk="low")
     got = []
-    monkeypatch.setattr(app.approvals, "decide", lambda aid, d, a=None, s="once": got.append((aid, d, a)) or {"status": d})
+    monkeypatch.setattr(app.approvals, "decide", lambda aid, d, a=None, s="once", src="pc": got.append((aid, d, a)) or {"status": d})
     await tg.watch_once()
     mid = tg.shown["q1"]["mid"]
     assert tg.fake.sent()[-1]["reply_markup"]["force_reply"]
@@ -258,3 +258,81 @@ def test_endpoints(app, monkeypatch):
         assert c.post("/api/telegram/options", headers=h, json={"allow_screenshot": True}).json()["allow_screenshot"] is True
         assert c.post("/api/telegram/disconnect", headers=h).json()["enabled"] is False
         assert app.secrets.get("telegram_bot") is None
+
+
+# ------------------------------------------------------------ v0.5: honest, never-twice, restart-proof
+def _fake_create(app, seen):
+    def create(ins, device=None, pre_approve=False, schedule=None, allow_grant=True):
+        seen.update(ins=ins, allow_grant=allow_grant)
+        app.db.exec("INSERT INTO tasks(id,instruction,device,state,created,updated) VALUES('tsk7',?,?,?,?,?)", (ins, device, "Running", time.time(), time.time()))
+        return "tsk7"
+    return create
+
+
+async def test_blanket_grant_is_not_accepted_from_the_phone(tg, app, monkeypatch):
+    await paired(tg, app)
+    seen = {}
+    monkeypatch.setattr(app.orchestrator, "create", _fake_create(app, seen))
+    await tg.handle(msg("Authorization granted. Delete the old reports"))
+    assert seen["allow_grant"] is False and "not accepted from the phone" in tg.fake.texts()[-1]
+
+
+async def test_engine_honours_allow_grant(app, monkeypatch):
+    import asyncio
+
+    ctxs = []
+
+    async def fake_run(tid, instruction, ctx):
+        ctxs.append(ctx)
+
+    monkeypatch.setattr(app.orchestrator, "_run", fake_run)
+    app.loop = asyncio.get_running_loop()
+    app.orchestrator.create("Authorization granted, tidy the output folder", allow_grant=False)
+    app.orchestrator.create("Authorization granted, tidy the temp folder")
+    await asyncio.sleep(0.05)
+    assert [(c.approve_all, c.elevated) for c in ctxs] == [(False, False), (True, True)]   # phone: no blanket grant; PC: still works
+
+
+async def test_the_same_phone_request_is_not_started_twice(tg, app, monkeypatch):
+    await paired(tg, app)
+    seen = {}
+    monkeypatch.setattr(app.orchestrator, "find_running", lambda t: "tsk5")
+    monkeypatch.setattr(app.orchestrator, "create", _fake_create(app, seen))
+    await tg.handle(msg("send the report to Ravi"))
+    assert not seen and "already running" in tg.fake.texts()[-1] and "tsk5" in tg.tracked
+
+
+async def test_phone_tasks_survive_a_restart_and_the_outcome_still_arrives(tg, app, monkeypatch):
+    await paired(tg, app)
+    seen = {}
+    monkeypatch.setattr(app.orchestrator, "find_running", lambda t: None)
+    monkeypatch.setattr(app.orchestrator, "create", _fake_create(app, seen))
+    await tg.handle(msg("compile the stock report"))
+    assert tg.cfg()["tracked"] == ["tsk7"]
+    app.db.exec("UPDATE tasks SET state='Failed',error='Interrupted by restart' WHERE id='tsk7'")   # what recover() does
+    again = Telegram(app, tg.client)                                       # RAM AI restarted: a new object
+    again.start()
+    again.stop()
+    assert "tsk7" in again.tracked
+    await again.watch_once()
+    assert "Interrupted by restart" in tg.fake.texts()[-1] and again.cfg()["tracked"] == []
+
+
+async def test_unfinished_work_is_never_called_done_on_the_phone(tg, app):
+    await paired(tg, app)
+    app.db.exec("INSERT INTO tasks(id,instruction,device,state,result,created,updated) VALUES('tsk8','reply to Wan','d','Incomplete','The send was declined.',1,1)")
+    tg.tracked["tsk8"] = time.time()
+    await tg.watch_once()
+    assert tg.fake.texts()[-1].startswith("⚠ NOT fully done") and "declined" in tg.fake.texts()[-1] and "✅" not in tg.fake.texts()[-1]
+
+
+async def test_decline_has_its_own_button_and_says_nothing_was_sent(tg, app, monkeypatch):
+    await paired(tg, app)
+    await seed_approval(app)
+    got = []
+    monkeypatch.setattr(app.approvals, "decide", lambda aid, d, a=None, s="once", src="pc": got.append((d, src)) or {"status": d})
+    await tg.watch_once()
+    rows = tg.fake.sent()[-1]["reply_markup"]["inline_keyboard"]
+    assert [len(r) for r in rows] == [1, 1, 1] and rows[-1][0]["callback_data"] == "an:ap1"        # every button on its own row
+    await tg.handle({"update_id": 9, "callback_query": {"id": "c", "from": {"id": OWNER}, "data": "an:ap1"}})
+    assert got == [("reject", "phone")] and "nothing was sent" in tg.fake.texts()[-1].lower()

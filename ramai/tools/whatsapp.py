@@ -237,6 +237,65 @@ def paste_text(text: str) -> None:
         _clip_set(saved)
 
 
+DATE_CHIP = re.compile(r"^(today|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}/\d{1,2}/\d{2,4}|"
+                       r"\d{1,2} [a-z]{3,9},? \d{4})$", re.I)
+TIME_ONLY = re.compile(r"^\d{1,2}:\d{2}\s?(?:[ap]m)?\b.{0,4}$", re.I)
+TIME_TAIL = re.compile(r"\s+(\d{1,2}:\d{2}\s?[ap]m)\b.{0,4}$", re.I)
+
+
+def bubble_side(shot, ln) -> str:
+    """Who a message line belongs to, from the colour of the bubble behind it: green = the user's own (outgoing), white or
+    dark grey = the other person's. OCR alone cannot tell, and mixing the two up gives a wrong summary."""
+    if not shot:
+        return ""
+    img, rc = shot
+    x0, y0 = ln.x - rc[0] - 7, ln.cy - rc[1]
+    px = img.load()
+    pts = []
+    for dx in (-2, 0, 2):
+        for dy in (-2, 0, 2):
+            x, y = x0 + dx, y0 + dy
+            if 0 <= x < img.width and 0 <= y < img.height:
+                pts.append(px[x, y])
+    if not pts:
+        return ""
+    r, g, b = (sorted(p[i] for p in pts)[len(pts) // 2] for i in range(3))
+    return "you" if (g - r >= 12 and g - b >= 6) else "them"
+
+
+def classify_messages(lines, shot, limit: int = 15) -> list[dict]:
+    """OCR lines of the open conversation -> messages with who sent them and when (latest last)."""
+    out: list[dict] = []
+    if shot:
+        shot = (shot[0].convert("RGB"), shot[1])  # once, not per line
+    for ln in sorted(lines, key=lambda x: x.y):
+        t = ln.text.strip()
+        if not t:
+            continue
+        prev = out[-1] if out else None
+        if TIME_ONLY.match(t):
+            if prev and prev["from"] in ("you", "them", "unknown") and "time" not in prev:
+                prev["time"] = t.split()[0] + (" " + t.split()[1] if len(t.split()) > 1 and t.split()[1].lower() in ("am", "pm") else "")
+            continue
+        if DATE_CHIP.match(t):
+            out.append({"from": "system", "text": t})
+            continue
+        side = bubble_side(shot, ln) or "unknown"
+        tm = TIME_TAIL.search(t)
+        if tm:
+            t = t[: tm.start()].strip()
+        if prev and prev["from"] == side and "time" not in prev and ln.y - prev["_y"] <= 1.8 * max(ln.h, 18):
+            prev["text"] += "\n" + t
+            prev["_y"] = ln.y
+        else:
+            out.append({"from": side, "text": t, "_y": ln.y})
+        if tm:
+            out[-1]["time"] = tm.group(1)
+    for m in out:
+        m.pop("_y", None)
+    return out[-limit:]
+
+
 # ================================================================== desktop backend (OCR + keyboard)
 class Desktop:
     def __init__(self, app):
@@ -265,28 +324,96 @@ class Desktop:
         L, T, r, b, split = self.geom()
         return ocr.read_region(L, T, split, b, scale=1.5)
 
-    def ocr_header(self):
+    def window_image(self):
+        """WhatsApp's OWN pixels (PrintWindow), so another window on top (RAM AI itself, a chat app...) cannot hide or
+        corrupt what is read. None when the window cannot be captured (minimised, or the GPU gives a black frame)."""
+        from .. import capture
+
+        try:
+            got = capture.capture_window(self.h)
+            if not got:
+                return None
+            img, rc = got
+            if img.convert("L").getextrema()[1] < 8:
+                return None
+            return img, rc
+        except Exception:
+            return None
+
+    def read_area(self, left: int, top: int, right: int, bottom: int, scale: float = 1.0, shot=None):
+        """OCR a screen rectangle of the WhatsApp window: from the window's own pixels first, the live screen as fallback."""
         from .. import ocr
 
+        shot = shot or self.window_image()
+        if shot:
+            img, rc = shot
+            try:
+                crop = img.crop((max(0, left - rc[0]), max(0, top - rc[1]), min(img.width, right - rc[0]), min(img.height, bottom - rc[1])))
+                if crop.width > 5 and crop.height > 5:
+                    lines = ocr.read_image(crop, left, top, scale)
+                    if lines:
+                        return lines
+            except Exception:
+                pass
+        return ocr.read_region(left, top, right, bottom, scale=scale)
+
+    def ocr_header(self):
         L, T, r, b, split = self.geom()
-        for _ in range(4):  # retry: the window may still be repainting right after a focus switch
-            lines = sorted(ocr.read_region(split + 5, T + 25, r - 200, T + 130, scale=2.0), key=lambda x: x.y)
+        for _ in range(3):  # retry: the window may still be repainting right after a focus switch
+            lines = sorted(self.read_area(split + 5, T + 25, r - 200, T + 130, scale=2.0), key=lambda x: x.y)
             if lines:
                 return lines[0].text
             time.sleep(0.15)
         return ""
 
-    def ocr_bottom(self):
-        from .. import ocr
+    def uia_chat_name(self) -> str | None:
+        """The open chat's name straight from Windows' accessibility tree - exact, needs no OCR: the message box is named
+        'Type a message to <name>' and the header button 'Contact info <name>' (groups: 'Group info <name>')."""
+        try:
+            root = uia.root(self.h)
+            for el in uia.find_all(root, ctype="edit"):
+                m = re.match(r"^type a message to\s+(.+)$", uia.name_of(el).strip(), re.I)
+                if m:
+                    return m.group(1).strip()
+            for el in uia.find_all(root, ctype="button"):
+                m = re.match(r"^(?:contact|group|business) info\s+(.+)$", uia.name_of(el).strip(), re.I)
+                if m:
+                    return m.group(1).strip()
+        except Exception:
+            pass
+        return None
 
+    def header_ok(self, expect: str) -> str | None:
+        """Is `expect` the chat that is open? True if Windows' own name for it, or an OCR of the header (from the window's
+        pixels, then from the screen), matches. Returns the name that matched."""
+        for get in (self.uia_chat_name, self.ocr_header):
+            try:
+                n = get()
+            except Exception:
+                n = None
+            if n and same_name(n, expect):
+                return n
+        return None
+
+    def header_seen(self) -> str:
+        """What the header shows now, for error messages."""
+        try:
+            return self.uia_chat_name() or self.ocr_header() or "(nothing readable)"
+        except Exception:
+            return "(nothing readable)"
+
+    def ocr_bottom(self):
         L, T, r, b, split = self.geom()
-        return ocr.read_region(split + 5, b - 110, r, b, scale=2.0)
+        return self.read_area(split + 5, b - 110, r, b, scale=2.0)
+
+    def conversation_shot(self):
+        """(lines, shot): the visible conversation as OCR lines, plus the window picture they were read from."""
+        L, T, r, b, split = self.geom()
+        shot = self.window_image()
+        return sorted(self.read_area(split + 5, T + 120, r, b - 90, scale=1.5, shot=shot), key=lambda x: x.y), shot
 
     def ocr_conversation(self):
-        from .. import ocr
-
-        L, T, r, b, split = self.geom()
-        return sorted(ocr.read_region(split + 5, T + 120, r, b - 90, scale=1.5), key=lambda x: x.y)
+        return self.conversation_shot()[0]
 
     def ensure(self):
         import subprocess
@@ -484,11 +611,16 @@ class Desktop:
             row = ranked[0]
             if len(ranked) > 1 or _norm(row["title"]) != _norm(query):
                 self.pick_note = explain(query, ranked, lambda c: c["title"])
-        self.fg_guard()
-        pyautogui.click(row["cx"], row["cy"])
-        hdr = uia.wait_for(lambda: (lambda t: t if same_name(t, row["title"]) else None)(self.ocr_header()), 4, 0.25)
+        hdr = None
+        for attempt in range(2):  # a missed click or a slow repaint is retried once before giving up
+            self.fg_guard()
+            pyautogui.click(row["cx"], row["cy"])
+            hdr = uia.wait_for(lambda: self.header_ok(row["title"]), 4, 0.25)
+            if hdr:
+                break
         if not hdr:
-            raise PolicyError(f"Clicked '{row['title']}' but the open chat header shows '{self.ocr_header()}'. Nothing typed.")
+            raise PolicyError(f"Clicked '{row['title']}' twice but cannot confirm that chat is open (WhatsApp shows '{self.header_seen()}'). "
+                              "Nothing typed. Do not work around this with manual clicks; report it to the user.")
         self.reset_search()
         return row["title"]
 
@@ -524,9 +656,8 @@ class Desktop:
         import pyautogui
 
         self.fg_guard()
-        hdr = self.ocr_header()
-        if not same_name(hdr, chat_title):
-            raise PolicyError(f"The open chat is now '{hdr}', not '{chat_title}'. Nothing sent.")
+        if not self.header_ok(chat_title):
+            raise PolicyError(f"The open chat is now '{self.header_seen()}', not '{chat_title}'. Nothing sent.")
         if _clean(read_box()) != _clean(text):
             raise PolicyError("The message box no longer holds exactly the approved text. Nothing sent.")
         self.fg_guard()
@@ -544,8 +675,12 @@ class Desktop:
 
     def read_chat(self, query: str, n: int, ctx, choice: int | None = None) -> dict:
         title = self.open_chat(query, ctx, choice)
-        lines = [x.text for x in self.ocr_conversation()]
-        return {"chat": title, "visible_text_lines": lines[-n * 2:], "note": "OCR of the visible conversation (latest at the end)."}
+        lines, shot = self.conversation_shot()
+        msgs = classify_messages(lines, shot, n)
+        return {"chat": title, "messages": msgs,
+                "note": "Latest message last. from='you' = sent BY THE USER (green bubble), from='them' = sent by the other person, "
+                        "'system' = date/notice. Quote who said what exactly as labelled; if from is 'unknown', say you cannot tell. A message "
+                        "that starts with 'You' + a line is a REPLY quoting an earlier message of the user's; the actual sender is the 'from' label."}
 
 
 # ================================================================== web backend (only if the app is not installed)
@@ -607,6 +742,37 @@ class WhatsApp:
         self.web = Web(app)
         self.prepared: dict | None = None
         self.lock = asyncio.Lock()
+
+    async def discard_draft(self) -> None:
+        """The user declined a message that was already typed into the chat box: take it out again, so the unsent text is not
+        left behind (it would block the next attempt and could be sent by accident). Best effort; only clears the box of the
+        very chat it was typed in."""
+        pr, self.prepared = self.prepared, None
+        if not pr or pr.get("backend") != "desktop":
+            return
+        async with self.lock:
+            def run():
+                import pyautogui
+
+                d = self.desktop
+                d.h = find_wa_window() or d.h
+                if not d.h:
+                    return
+                d.fg_guard()
+                if not d.header_ok(pr["chat"]):
+                    return
+                for el in uia.find_all(uia.root(d.h), ctype="edit"):
+                    if re.match(r"^type a message", uia.name_of(el).strip(), re.I):
+                        uia.click_el(el)
+                        time.sleep(0.15)
+                        d.fg_guard()
+                        pyautogui.hotkey("ctrl", "a")
+                        pyautogui.press("delete")
+                        return
+            try:
+                await asyncio.to_thread(run)
+            except Exception:
+                pass
 
     def backend(self) -> str:
         pref = self.app.settings.get("whatsapp_backend", "auto")

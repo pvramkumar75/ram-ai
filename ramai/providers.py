@@ -134,9 +134,23 @@ class LLM:
                  "active": pid == self.provider()} for pid, c in PROVIDERS.items()]
 
     async def chat(self, messages: list[dict], tools: list[dict] | None = None, temperature: float = 0.2) -> dict:
-        model = self.model()
-        if not model:
+        """One model call. If the model in use keeps failing (overloaded, down, retired) and other models are listed in the
+        settings box, the next one answers instead, so a task is not lost to one model's bad hour."""
+        models = self.models()
+        if not models:
             raise ProviderError(f"No model selected for {self.label()}. Open Settings, press Test & list models and choose one.")
+        last: ProviderError | None = None
+        for model in models:
+            try:
+                return await self._chat_with(model, messages, tools, temperature)
+            except ProviderError as e:
+                s = str(e)
+                if "API key" in s or "credits" in s or "does not support tool" in s:   # another model will not fix these
+                    raise
+                last = e
+        raise last or ProviderError("The AI provider did not answer")
+
+    async def _chat_with(self, model: str, messages: list[dict], tools: list[dict] | None, temperature: float) -> dict:
         payload: dict[str, Any] = {"model": model, "messages": messages}
         if model not in self._no_temperature:
             payload["temperature"] = temperature

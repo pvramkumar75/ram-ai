@@ -112,7 +112,7 @@ async function trackTask(id) {
     tasks.set(id, t); renderTask(t); } catch { }
 }
 // scheduled runs start on their own: pick them up in the Agent feed
-setInterval(async () => { try { for (const r of (await api("/tasks")).slice(0, 5)) if (!tasks.has(r.id) && !["Completed", "Failed", "Cancelled"].includes(r.state)) trackTask(r.id); } catch { } }, 5000);
+setInterval(async () => { try { for (const r of (await api("/tasks")).slice(0, 5)) if (!tasks.has(r.id) && !["Completed", "Failed", "Cancelled", "Incomplete"].includes(r.state)) trackTask(r.id); } catch { } }, 5000);
 
 // ---------------------------------------------------------------- status + setup wizard
 async function loadStatus() {
@@ -254,7 +254,7 @@ function renderTask(t) {
     t.el.querySelector(".wl-head").onclick = () => { t.open = !t.open; t.showAll = t.open; renderTask(t); };
     $("#tasks-feed").appendChild(t.el); $("#empty-hint").classList.add("hidden");
   }
-  const running = !["Completed", "Failed", "Cancelled"].includes(t.state);
+  const running = !["Completed", "Failed", "Cancelled", "Incomplete"].includes(t.state);
   t.el.querySelector(".meta").textContent = `${t.device || ""}${t.remote ? " (remote)" : ""} · ${new Date((t.created || nowSec()) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
   const items = buildItems(t);
   const nSteps = items.filter(x => x.k === "step").length;
@@ -281,6 +281,7 @@ function renderTask(t) {
   }).join("");
   if (running && t.thinking_since) html += `<div class="thinking"><span class="shimmer">✦ Thinking… ${Math.max(0, Math.round(nowSec() - t.thinking_since + (t.skew || 0)))}s</span></div>`;
   else if (running && t.state === "Awaiting approval") html += `<div class="thinking"><span class="shimmer">Waiting for you…</span></div>`;
+  else if (running && t.state === "Waiting for the screen") html += `<div class="thinking"><span class="shimmer">Waiting for another task to finish with the screen…</span></div>`;
   else if (running && !items.length) html += `<div class="thinking"><span class="shimmer">✦ Starting…</span></div>`;
   const steps = t.el.querySelector(".steps");
   steps.classList.toggle("hidden", !t.open);
@@ -291,6 +292,7 @@ function renderTask(t) {
   }
   const fin = t.el.querySelector(".fin");
   const fh = t.state === "Completed" ? `<div class="final"><div class="who"><span class="logo">◆</span> RAM AI</div>${md(t.result)}</div>`
+    : t.state === "Incomplete" ? `<div class="final err"><div class="who">⚠ NOT fully done</div>${md(t.result || t.error || "")}</div>`
     : t.state === "Failed" ? `<div class="final err">${esc(t.error || "Failed")}</div>` : t.state === "Cancelled" ? `<div class="final err">${esc(t.error || "Stopped.")}</div>` : "";
   if (fin._h !== fh) { fin.innerHTML = fh; fin._h = fh; if (fh && t._wasRunning) { t.open = false; renderTask(t); } }
   t._wasRunning = running;
@@ -432,12 +434,12 @@ document.querySelectorAll(".hint-row").forEach(h => h.onclick = () => { $("#inst
 $("#stop").onclick = async () => {
   try {
     await api("/stop", "POST");
-    for (const t of tasks.values()) if (t.remote && !["Completed", "Failed", "Cancelled"].includes(t.state)) await api(`/peers/${t.remote.id}/rpc`, "POST", { method: "cancel_task", params: { id: t.id } });
+    for (const t of tasks.values()) if (t.remote && !["Completed", "Failed", "Cancelled", "Incomplete"].includes(t.state)) await api(`/peers/${t.remote.id}/rpc`, "POST", { method: "cancel_task", params: { id: t.id } });
   } catch { }
   toast("Stopped.");
 };
 
-const activeTasks = () => [...tasks.values()].filter(t => !["Completed", "Failed", "Cancelled"].includes(t.state));
+const activeTasks = () => [...tasks.values()].filter(t => !["Completed", "Failed", "Cancelled", "Incomplete"].includes(t.state));
 
 async function pollTasks() {
   for (const t of activeTasks()) {
