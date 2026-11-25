@@ -568,6 +568,7 @@ $("#export").onclick = async () => { const d = await api("/export"); const a = d
 // ---------------------------------------------------------------- settings
 async function renderSettings() {
   await loadStatus(); const s = S.settings, el = $("#settings");
+  const tg = await api("/telegram").catch(() => ({}));
   el.innerHTML = `
   <section><h3>AI model (reasoning)</h3>
     <p class="muted">Pick which AI plans and runs your tasks. You can switch any time here or from the header. Keys are stored encrypted on this PC (Windows DPAPI).</p>
@@ -603,6 +604,16 @@ async function renderSettings() {
   <section><h3>WhatsApp Web (experimental)</h3>
     <p class="muted">Opens WhatsApp Web in a RAM AI-owned Edge profile. You scan the QR code yourself. Unofficial automation can break or breach WhatsApp terms; messages are only sent after your approval.</p>
     <button id="w-open">Open WhatsApp Web</button><span id="w-st" class="muted"></span></section>
+  <section><h3>Phone (Telegram)</h3>
+    <p class="muted">Give RAM AI instructions from your phone and tap Approve or Decline there. It uses your own private Telegram bot: RAM AI only calls out to Telegram, nothing is opened on this PC. Only the phone you pair can use it. Messages pass through Telegram's servers, so turn on Two-step verification in Telegram.</p>
+    ${!tg.enabled ? `<p class="muted">1. In Telegram open <b>@BotFather</b>, send <b>/newbot</b>, pick a name, and copy the token it gives you. 2. Paste it here.</p>
+      <div class="row"><input id="tg-token" type="password" placeholder="Bot token, like 123456789:AAH…"><button id="tg-connect">Connect</button></div>`
+    : `<p class="muted">Bot: <b>@${esc(tg.bot)}</b> · ${tg.connected ? "connected to Telegram" : "not connected yet"}${tg.error ? " — " + esc(tg.error) : ""}${tg.paired ? " · Paired with <b>" + esc(tg.who) + "</b>" : " · no phone paired yet"}</p>
+      ${tg.paired ? `<div class="row"><label class="tog"><input type="checkbox" id="tg-hr" ${tg.phone_high_risk ? "checked" : ""}> Let my phone approve high-risk actions (sending mail or messages, deleting). Off = those must be approved on the PC</label></div>
+        <div class="row"><label class="tog"><input type="checkbox" id="tg-ss" ${tg.allow_screenshot ? "checked" : ""}> Allow /screenshot (the picture passes through Telegram)</label></div>
+        <div class="row"><button id="tg-test">Send a test message</button><button class="ghost" id="tg-unpair">Unpair this phone</button><button class="ghost" id="tg-disc">Remove bot</button></div>`
+      : `<div class="row"><button id="tg-pair">Pair my phone</button><button class="ghost" id="tg-disc">Remove bot</button></div>`}`}
+    <div id="tg-out" class="msg"></div></section>
   <section><h3>Two-PC connection (over Tailscale / private VPN)</h3>
     <p class="muted">Paired: ${s.peers.map(p => esc(p.name) + ` <a href="#" data-unpair="${esc(p.id)}">revoke</a>`).join(", ") || "none"}. Listening: ${esc(s.remote.enabled ? s.remote.bind + ":" + s.remote.port : "off")}</p>
     <div class="row"><input id="p-bind" placeholder="This PC's Tailscale IP (100.x.y.z)" value="${esc(s.remote.bind)}"><input id="p-port" value="${esc(s.remote.port)}"><label class="inline"><input type="checkbox" id="p-ss" ${s.remote.allow_screenshot ? "checked" : ""}> allow remote screenshots</label></div>
@@ -656,6 +667,19 @@ async function renderSettings() {
   $("#o-in").onclick = guard(async () => { await api("/outlook/login", "POST"); toast("Complete sign-in in the browser window that opened."); });
   $("#o-out").onclick = guard(async () => { await api("/outlook/logout", "POST"); renderSettings(); });
   $("#w-open").onclick = guard(async () => { $("#w-st").textContent = " opening…"; const r = await api("/whatsapp/open", "POST"); $("#w-st").textContent = " " + r.status + (r.error ? ": " + r.error : ""); });
+  const tgBind = (id, fn) => { const b = $(id); if (b) b.onclick = guard(fn); };
+  tgBind("#tg-connect", async () => { out("#tg-out", true, "Connecting…"); await api("/telegram/connect", "POST", { token: $("#tg-token").value }); renderSettings(); });
+  tgBind("#tg-pair", async () => {
+    const r = await api("/telegram/pair", "POST");
+    const o = $("#tg-out"); o.className = "msg ok";
+    o.innerHTML = `On your phone open <a href="${esc(r.link)}" target="_blank" rel="noopener">${esc(r.link)}</a> and press Start. Or send this code to @${esc(r.bot)}: <b>${esc(r.code)}</b> (valid 10 minutes, one use).`;
+    const t = setInterval(async () => { if (!$("#tg-out")) return clearInterval(t); try { if ((await api("/telegram")).paired) { clearInterval(t); renderSettings(); } } catch { } }, 2000);
+  });
+  tgBind("#tg-test", async () => { await api("/telegram/test", "POST"); out("#tg-out", true, "Sent. Check your phone."); });
+  tgBind("#tg-unpair", async () => { if (confirm("Disconnect this phone? You can pair it again later.")) { await api("/telegram/unpair", "POST"); renderSettings(); } });
+  tgBind("#tg-disc", async () => { if (confirm("Remove the bot from RAM AI? The phone will stop working until you set it up again.")) { await api("/telegram/disconnect", "POST"); renderSettings(); } });
+  if ($("#tg-hr")) $("#tg-hr").onchange = guard(async () => { await api("/telegram/options", "POST", { phone_high_risk: $("#tg-hr").checked }); toast("Saved"); });
+  if ($("#tg-ss")) $("#tg-ss").onchange = guard(async () => { await api("/telegram/options", "POST", { allow_screenshot: $("#tg-ss").checked }); toast("Saved"); });
   $("#p-on").onclick = guard(async () => { const r = await api("/remote/enable", "POST", { bind: $("#p-bind").value, port: +$("#p-port").value, allow_screenshot: $("#p-ss").checked }); out("#p-out", true, "Listening on " + r.listening + " (TLS fingerprint " + r.fingerprint.slice(0, 16) + "…)"); });
   $("#p-off").onclick = guard(async () => { await api("/remote/disable", "POST"); renderSettings(); });
   $("#p-code").onclick = guard(async () => { const r = await api("/pairing/start", "POST"); out("#p-out", true, "Pairing code (valid 10 min, single use): " + r.code + " — enter it on the other PC together with this PC's URL " + (r.url || "(start listening first)")); });

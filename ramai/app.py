@@ -169,6 +169,9 @@ class App:
         self.outlook = outlook.OutlookAuth(self)
         self.whatsapp = whatsapp.WhatsApp(self)
         self.remote_server = remote.RemoteServer(self)
+        from .telegram import Telegram
+
+        self.telegram = Telegram(self)
         self.policy.settings.get("output_dir") and self._ensure_output()
 
     def _ensure_output(self):

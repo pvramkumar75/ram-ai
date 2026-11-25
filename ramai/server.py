@@ -36,6 +36,7 @@ def create_api(app: App, token: str | None = None, port: int = 8765) -> FastAPI:
         app.loop = asyncio.get_running_loop()
         app.orchestrator.recover()
         app.scheduler.start()
+        app.telegram.start()
         app.db.purge_older_than(app.settings.get("retention_days", 90))
 
     @api.middleware("http")
@@ -592,6 +593,51 @@ def create_api(app: App, token: str | None = None, port: int = 8765) -> FastAPI:
         r = app.settings.get("remote")
         r["enabled"] = False
         app.settings.set("remote", r)
+        return {"ok": True}
+
+    # ---------------------------------------------------------------- phone (Telegram)
+    @api.get("/api/telegram")
+    async def telegram_status():
+        return app.telegram.status()
+
+    @api.post("/api/telegram/connect")
+    async def telegram_connect(body: dict = Body(...)):
+        try:
+            return await app.telegram.connect(str(body.get("token", "")))
+        except PolicyError as e:
+            err(e)
+
+    @api.post("/api/telegram/pair")
+    async def telegram_pair():
+        try:
+            return app.telegram.start_pairing()
+        except PolicyError as e:
+            err(e)
+
+    @api.post("/api/telegram/unpair")
+    async def telegram_unpair():
+        app.telegram.unpair()
+        return app.telegram.status()
+
+    @api.post("/api/telegram/disconnect")
+    async def telegram_disconnect():
+        app.telegram.disconnect()
+        return app.telegram.status()
+
+    @api.post("/api/telegram/options")
+    async def telegram_options(body: dict = Body(...)):
+        app.telegram.save(**{k: bool(body[k]) for k in ("allow_screenshot", "phone_high_risk") if k in body})
+        return app.telegram.status()
+
+    @api.post("/api/telegram/test")
+    async def telegram_test():
+        chat = int(app.telegram.cfg().get("chat_id") or 0)
+        if not chat:
+            raise HTTPException(409, "No phone is paired yet")
+        try:
+            await app.telegram.send(chat, "✅ Test message from RAM AI on " + app.device_name)
+        except PolicyError as e:
+            err(e, 502)
         return {"ok": True}
 
     @api.post("/api/pairing/start")
