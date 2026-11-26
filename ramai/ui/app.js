@@ -115,10 +115,19 @@ async function trackTask(id) {
 setInterval(async () => { try { for (const r of (await api("/tasks")).slice(0, 5)) if (!tasks.has(r.id) && !["Completed", "Failed", "Cancelled", "Incomplete"].includes(r.state)) trackTask(r.id); } catch { } }, 5000);
 
 // ---------------------------------------------------------------- status + setup wizard
+let updateDismissed = "";
+$("#update-later").onclick = () => { updateDismissed = S.update?.version || ""; $("#update-bar").classList.add("hidden"); };
+$("#update-now").onclick = async () => {
+  if (!confirm("Update RAM AI now? A window opens, downloads the new version and restarts RAM AI. Finish running tasks first.")) return;
+  try { await api("/update/run", "POST"); toast("Updating… follow the new window.", 8000); } catch (e) { toast(e.message, 6000); }
+};
 async function loadStatus() {
   try { S = await api("/status"); tokenBad = false; }
   catch (e) { if (!tokenBad) { tokenBad = true; showSystem("Cannot reach the agent (" + e.message + "). Close this window and re-open RAM AI from Start_RAM_AI.bat."); } return; }
   if (S.version) { $("#ver").textContent = "v" + S.version; }
+  const up = S.update && S.update.version !== updateDismissed ? S.update : null;
+  $("#update-bar").classList.toggle("hidden", !up);
+  if (up) $("#update-text").textContent = `⬆ RAM AI ${up.version} is available (you have ${S.version}).`;
   if (!S.configured) $("#wizard").classList.remove("hidden");
 }
 function showSystem(text) { const d = document.createElement("div"); d.className = "final err"; d.textContent = text; $("#ap-misc").appendChild(d); }
@@ -623,11 +632,13 @@ async function renderSettings() {
     <div class="row"><input id="p-url" placeholder="Other PC's URL, e.g. https://100.64.0.2:8766"><input id="p-c" placeholder="Pairing code"><button id="p-join">Pair</button></div>
     <div id="p-out" class="msg"></div></section>
   <section><h3>Memory (user-approved preferences)</h3><div id="mem"></div></section>
+  <section><h3>What RAM AI has learned</h3><p class="muted">Short notes it writes for itself when a task only worked after something failed. They are about operating apps, never about approvals. Delete any that are wrong.</p><div id="lessons"></div></section>
   <section><h3>General</h3><div class="row"><input id="g-user" value="${esc(s.user_name || "")}" placeholder="Your name"><button id="g-usave">Save my name</button></div>
     <div class="row"><input id="g-name" value="${esc(s.device_name)}"><button id="g-save">Rename this PC</button></div>
     <div class="row"><label class="muted" style="flex:0 0 auto">🎤 Voice language</label><select id="g-vlang">${[["en-IN", "English (India)"], ["en-US", "English (US)"], ["en-GB", "English (UK)"], ["hi-IN", "Hindi"], ["te-IN", "Telugu"], ["ta-IN", "Tamil"], ["kn-IN", "Kannada"], ["ml-IN", "Malayalam"], ["mr-IN", "Marathi"], ["bn-IN", "Bengali"], ["gu-IN", "Gujarati"]].map(([v, n]) => `<option value="${v}" ${v === (s.voice_lang || "en-IN") ? "selected" : ""}>${n}</option>`).join("")}</select>
       <span class="muted small" style="flex:0 0 auto">Hold 🎤 (or Ctrl+M) while you speak, let go to send</span></div>
     <div class="row"><label class="tog"><input type="checkbox" id="g-dock" ${s.dock_while_working !== false ? "checked" : ""}> While a task runs, keep RAM AI on the right edge of the screen and the apps it works in on the left, so the work never hides this page</label></div>
+    <div class="row"><label class="tog"><input type="checkbox" id="g-upd" ${s.update_check !== false ? "checked" : ""}> Tell me when a new version of RAM AI is available</label><button class="ghost" id="g-updnow">Check now</button></div>
     <p class="muted">Version ${esc(S.version)} · Emergency stop: Ctrl+Alt+Q · Take control: Ctrl+Alt+P · Voice: hold Ctrl+M · Retention: ${esc(s.retention_days)} days</p></section>`;
   const out = (id, ok, m) => { const o = $(id); o.className = "msg " + (ok ? "ok" : "err"); o.textContent = m; };
   const guard = fn => async () => { try { await fn(); } catch (e) { toast(e.message, 5000); } };
@@ -691,6 +702,11 @@ async function renderSettings() {
   $("#g-save").onclick = guard(async () => { await api("/settings", "POST", { device_name: $("#g-name").value }); renderSettings(); });
   $("#g-dock").onchange = guard(async () => { await api("/settings", "POST", { dock_while_working: $("#g-dock").checked }); toast("Saved"); });
   $("#g-vlang").onchange = guard(async () => { await api("/settings", "POST", { voice_lang: $("#g-vlang").value }); S.settings.voice_lang = $("#g-vlang").value; toast("Voice language saved"); });
+  $("#g-upd").onchange = guard(async () => { await api("/settings", "POST", { update_check: $("#g-upd").checked }); toast("Saved"); });
+  $("#g-updnow").onclick = guard(async () => { const r = await api("/update/check", "POST"); toast(r.available ? `Version ${r.available.version} is available` : `You have the latest version (${r.current})`, 5000); loadStatus(); });
+  const learned = await api("/lessons").catch(() => []);
+  $("#lessons").innerHTML = learned.map(l => `<div class="row"><span>${esc(l.text)}</span><button class="ghost" data-ls="${l.id}">Delete</button></div>`).join("") || '<p class="muted">Nothing yet.</p>';
+  el.querySelectorAll("[data-ls]").forEach(b => b.onclick = guard(async () => { await api("/lessons/" + b.dataset.ls, "DELETE"); renderSettings(); }));
   const mem = await api("/memory");
   $("#mem").innerHTML = mem.map(m => `<div class="row"><span>${esc(m.key)} = ${esc(m.value)}</span><button class="ghost" data-mk="${esc(m.key)}">Delete</button></div>`).join("") || '<p class="muted">Empty.</p>';
   el.querySelectorAll("[data-mk]").forEach(b => b.onclick = guard(async () => { await api("/memory/" + encodeURIComponent(b.dataset.mk), "DELETE"); renderSettings(); }));

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import hashlib
 import json
 import threading
@@ -17,6 +18,7 @@ from .core import redact
 import re
 
 from .policy import ELEVATED, PolicyError, Risk
+from .scheduler import session_locked
 
 # Phrases by which the USER (never content from emails/files/web) grants full authority for the current task.
 AUTH_RE = re.compile(
@@ -52,7 +54,7 @@ def schedule_allows(name: str, args: dict, allowed: list[str], chat: str | None 
     if name in ("send_email",):
         rc = [*(args.get("to") or []), *(args.get("cc") or [])]
         return bool(rc) and all(_norm_rcpt(r) in ok for r in rc)
-    if name in ("whatsapp_send_message", "whatsapp_send_prepared"):
+    if name in ("whatsapp_send_message", "whatsapp_send_prepared", "whatsapp_send_extract"):
         keys = {_chat_key(a) for a in ok}
         return _chat_key(chat if chat else args.get("contact", "")) in keys
     return False
@@ -71,6 +73,13 @@ NEVER_AUTO = {"pair_device"}
 SCREEN_TOOLS = {"focus_window", "launch_app", "ui_elements", "ui_click", "ui_type", "click_text", "read_screen_text", "copy_window_text",
                 "ask_chatgpt", "open_url"}
 SCREEN_WAIT = 240          # seconds a task waits for the screen before telling the user it is busy
+SCREEN_WAIT_SCHEDULE = 900  # a scheduled run waits longer: nobody is there to start it again
+LOCK_WAIT = 600            # seconds to wait for a locked PC to be unlocked
+NETWORK_WAITS = (15, 30, 60, 120)   # pauses before asking the AI service again when it cannot be reached
+NETWORK_RE = re.compile(r"network error|HTTP 5\d\d|HTTP 429|unavailable after retries", re.I)
+DIRECT_RE = re.compile(r"^RUN TOOL (\w+) (\{.*\})\s*$", re.M)   # a schedule that is one fixed tool call: no AI improvising
+DIRECT_RETRY_WAIT = 45
+REPEAT_GUARD = 180         # an identical send this soon after the last one always asks again, even if pre-approved
 HARD_STEP_CAP = 300        # a task this long is stuck: stop and report instead of running (and costing) forever
 KEEP_FULL = 14             # newest tool results kept in full when the history gets long
 HISTORY_LIMIT = 220_000    # characters of history before older tool results are shortened (keeps every step fast)
@@ -135,11 +144,21 @@ class ApprovalManager:
         with self._lock:
             self._pending[aid] = {"future": fut, "loop": loop, "task_id": ctx.task_id, "hash": ahash}
         self.app.db.audit(ctx.task_id, ctx.device, f"{kind}_requested", tool, {"id": aid, "summary": summary})
+        dock = getattr(self.app, "dock", None)
+        if dock:
+            try:
+                dock.reveal()        # whatever the agent hid, the question must be visible
+            except Exception:
+                pass
         try:
-            return await asyncio.wait_for(fut, APPROVAL_TIMEOUT)
-        except asyncio.TimeoutError:
-            self._finish(aid, "expired", None)
-            return {"status": "expired", "answer": None}
+            deadline = time.time() + APPROVAL_TIMEOUT
+            while not fut.done():
+                left = deadline - time.time()
+                if left <= 0:        # wall clock: a PC that slept must not leave a task waiting for hours
+                    self._finish(aid, "expired", None)
+                    return {"status": "expired", "answer": None}
+                await asyncio.wait({fut}, timeout=min(5.0, left))
+            return fut.result()
         finally:
             with self._lock:
                 self._pending.pop(aid, None)
@@ -195,6 +214,8 @@ CLAIMS_DONE = re.compile(r"\b(sent|mailed|e-?mailed|messaged|forwarded|replied|p
 class Executor:
     def __init__(self, app, registry: Registry):
         self.app, self.reg = app, registry
+        self.recent: dict[str, float] = {}      # sends that really happened: action hash -> time (repeat warning)
+        self.locked = session_locked
 
     async def execute(self, ctx: ToolContext, name: str, raw_args: str | dict) -> tuple[str, bool]:
         """Returns (text for the model, ok)."""
@@ -252,21 +273,42 @@ class Executor:
         return bool(tool.control or name in SCREEN_TOOLS or name.startswith("whatsapp_"))
 
     async def _screen(self, ctx, tool, name: str) -> str | None:
-        """Take the screen for this task (waiting while another task has it). Returns an error text if it stays busy."""
-        if ctx.scratch.get("screen") or not self._needs_screen(tool, name):
+        """Take the screen for this task (waiting while another task has it, or while the PC is locked).
+        Returns an error text if it stays unavailable."""
+        if not self._needs_screen(tool, name):
             return None
+        if ctx.scratch.get("screen"):
+            return await self._wait_unlocked(ctx)
         lock = self.app.orchestrator.screen_lock
         if lock.locked():
             self.app.db.audit(ctx.task_id, ctx.device, "thought", None, {"text": "Another task is using the screen right now - waiting for it to finish."})
             self._set_state(ctx, "Waiting for the screen")
         try:
-            await asyncio.wait_for(lock.acquire(), SCREEN_WAIT)
+            await asyncio.wait_for(lock.acquire(), SCREEN_WAIT_SCHEDULE if ctx.schedule else SCREEN_WAIT)
         except asyncio.TimeoutError:
             self._set_state(ctx, "Running")
             return "The screen is busy with another task. Tell the user it is waiting, or try again in a minute."
         ctx.scratch["screen"] = True
         self._set_state(ctx, "Running")
-        return None
+        return await self._wait_unlocked(ctx)
+
+    async def _wait_unlocked(self, ctx) -> str | None:
+        if not self.locked():
+            return None
+        self.app.db.audit(ctx.task_id, ctx.device, "thought", None, {"text": "The PC is locked, so apps cannot be used. Waiting for it to be unlocked."})
+        self._set_state(ctx, "Waiting: PC is locked")
+        tg = getattr(self.app, "telegram", None)
+        if tg:
+            await tg.alert("\U0001F512 Your PC is locked, so I cannot work in its apps. Unlock it and I will carry on.")
+        deadline = time.time() + LOCK_WAIT
+        while time.time() < deadline:
+            await asyncio.sleep(min(5.0, max(0.05, deadline - time.time())))
+            if ctx.stopped():
+                return "Stopped by user"
+            if not self.locked():
+                self._set_state(ctx, "Running")
+                return None
+        return "The PC stayed locked, so nothing could be done in its apps. Tell the user to unlock it and run the task again."
 
     def release_screen(self, ctx) -> None:
         if ctx.scratch.pop("screen", None):
@@ -305,8 +347,10 @@ class Executor:
                     "A visible indicator is shown while controlling. Emergency stop: Ctrl+Alt+Q.", "medium")
                 self._set_state(ctx, "Running")
                 if res["status"] != "approved":
+                    self._note_blocked(ctx, "control", f"computer control was {res['status']}")
                     return json.dumps({"ok": False, "error": "User declined computer control"}), False
                 ctx.control_approved = True
+                self._note_blocked(ctx, "control", None)
                 busy = await self._screen(ctx, tool, name)
                 if busy:
                     return json.dumps({"ok": False, "error": busy}), False
@@ -321,10 +365,14 @@ class Executor:
                 chat = None
                 if name.startswith("whatsapp_send") and tool.preview:
                     chat = ((getattr(app, "whatsapp", None) and app.whatsapp.prepared) or {}).get("chat")
+                before = self.recent.get(ah)
+                repeat = bool(before and time.time() - before < REPEAT_GUARD and not ctx.schedule)
+                if before and time.time() - before < 3600:
+                    text = f"⚠ THE SAME THING WAS ALREADY DONE {max(1, int((time.time() - before) // 60))} min ago.\n" + text
                 if ctx.schedule and not ctx.approve_all and schedule_allows(name, adict, ctx.schedule.get("allowed", []), chat):
                     db.audit(ctx.task_id, ctx.device, "auto_approved", name, {"by": f"schedule '{ctx.schedule.get('title')}' (recipient approved when scheduled)", "details": text[:1500]})
                     res = {"status": "approved", "hash": ah}
-                elif ctx.approve_all and name not in NEVER_AUTO:
+                elif ctx.approve_all and name not in NEVER_AUTO and not repeat:
                     db.audit(ctx.task_id, ctx.device, "auto_approved", name, {"by": "task approval", "details": text[:1500]})
                     res = {"status": "approved", "hash": ah}
                 else:
@@ -377,6 +425,8 @@ class Executor:
                     tk.mark()  # input from now until the next step is the user's
             if risk == Risk.HIGH:
                 self._note_blocked(ctx, name, None)   # it really ran
+                if name.startswith(("send_email", "whatsapp_send")):
+                    self.recent[args_hash(name, adict)] = time.time()
             db.audit(ctx.task_id, ctx.device, "tool_result", name, {"ms": int((time.time() - t0) * 1000), "result": out})
             payload = {"ok": True, "result": out}
             text = wrap_untrusted(payload) if tool.untrusted else json.dumps(payload, default=str, ensure_ascii=False)
@@ -419,6 +469,7 @@ def register_system(reg: Registry) -> None:
     async def ask_user(a: AskArgs, ctx):
         ctx.app.set_task_state(ctx.task_id, "Awaiting approval")
         res = await ctx.app.approvals.request(ctx, "question", "ask_user", args_hash("ask", {"q": a.question}), a.question, "low")
+        ctx.app.executor._note_blocked(ctx, "ask_user", "a question to you went unanswered" if res["status"] == "expired" else None)
         ctx.app.set_task_state(ctx.task_id, "Running")
         if res["status"] != "approved":
             return {"answer": None, "note": "User did not answer"}
@@ -455,6 +506,8 @@ APP PLAYBOOK (fast, reliable — use these instead of screenshots/clicking):
   DESKTOP APP first and the web version only if the app is not installed. Never open_url a service's home page yourself;
   open_url is for a specific page (a search results URL, a document link) or when the user asks for the website.
 - WhatsApp: whatsapp_send_message(contact=<name as said>, text) does EVERYTHING in one call. Do not call whatsapp_open/find first.
+- Relaying a price/rate line from a chat ('copper rate', 'run the copper skill'): one whatsapp_send_extract call does it all
+  (take source chat, marker, line and destination from the saved schedule or skill; schedule_list shows them). Never read and scroll by hand for this.
   WhatsApp messages can be very long (~65,000 characters): ALWAYS send one message, never split an article into parts.
   WhatsApp text: plain text; for lists write "1." "2." normally (the tool pastes, so WhatsApp will not double-number). If it fails,
   report the error - never press Enter or click Send in WhatsApp yourself (those are sends and need approval anyway).
@@ -621,7 +674,59 @@ class Orchestrator:
             self.app.db.audit(tid, device, "task_pre_approved", None, {"by": "user at submission"})
         t = asyncio.get_running_loop().create_task(self._run(tid, instruction, ctx))
         self.running[tid] = (t, ctx)
+        self._keep_awake()
         return tid
+
+    def _keep_awake(self) -> None:
+        """While tasks run, Windows must not sleep or switch the screen off. Released as soon as nothing is running."""
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | (0x00000003 if self.running else 0))
+        except Exception:
+            pass
+
+    async def _chat(self, tid: str, ctx: ToolContext, messages: list[dict], specs: list[dict]) -> dict:
+        """Ask the model; if the service cannot be reached (network just woke up, server busy) wait and ask again."""
+        for wait in (*NETWORK_WAITS, None):
+            try:
+                return await self.app.deepseek.chat(messages, specs)
+            except ProviderError as e:
+                if wait is None or not NETWORK_RE.search(str(e)):
+                    raise
+                self.app.db.audit(tid, ctx.device, "thought", None, {"text": f"Cannot reach the AI service right now - trying again in {wait} s."})
+                await asyncio.sleep(wait)
+
+    async def _run_direct(self, tid: str, ctx: ToolContext, name: str, raw: str) -> None:
+        """A fixed routine: one tool, no AI. A failure that happened before anything was sent is retried."""
+        app = self.app
+        app.set_task_state(tid, "Running")
+        out, ok, err = "", False, ""
+        for attempt in range(3):
+            out, ok = await app.executor.execute(ctx, name, raw)
+            if ok or ctx.stopped():
+                break
+            try:
+                err = str(json.loads(out.split("\n[RAM AI]")[0]).get("error", ""))
+            except ValueError:
+                err = out[:300]
+            if "uncertain" in err.lower() or err.startswith("User ") or attempt == 2:
+                break
+            app.db.audit(tid, ctx.device, "thought", None, {"text": f"That did not work ({err[:150]}). Trying again in {DIRECT_RETRY_WAIT} s."})
+            ctx.scratch.pop("errs", None)
+            ctx.scratch.pop("off", None)
+            await asyncio.sleep(DIRECT_RETRY_WAIT)
+        if ctx.stopped():
+            raise asyncio.CancelledError()
+        if ok:
+            res = json.loads(out).get("result") or {}
+            sure = res.get("sent") != "uncertain" if isinstance(res, dict) else True
+            said = (res.get("text") if isinstance(res, dict) else None) or json.dumps(res, ensure_ascii=False)
+            final = (f"Sent to {res.get('chat', 'the chat')}:\n{said}" if sure else
+                     f"Pressed send but could not confirm it - please check the chat before running again:\n{said}")
+            state = "Completed" if sure else "Incomplete"
+        else:
+            final, state = f"Nothing was sent. {err}", "Incomplete"
+        app.db.exec("UPDATE tasks SET state=?,result=?,updated=? WHERE id=?", (state, final, time.time(), tid))
+        app.db.audit(tid, ctx.device, "task_completed" if state == "Completed" else "task_incomplete", None, {"result": final[:500]})
 
     def cancel(self, tid: str) -> bool:
         item = self.running.get(tid)
@@ -675,7 +780,8 @@ class Orchestrator:
                 dock.start()  # RAM AI on the right, the work on the left, so the user sees both
             except Exception:
                 dock = None
-        messages: list[dict] = [{"role": "system", "content": self._system_prompt(ctx)}]
+        lessons = getattr(app, "lessons", None)
+        messages: list[dict] = [{"role": "system", "content": self._system_prompt(ctx) + (lessons.prompt(instruction) if lessons else "")}]
         if not ctx.schedule:  # scheduled runs start clean: they must never copy the previous run's report
             prev = app.db.query("SELECT instruction,result FROM tasks WHERE state='Completed' AND result IS NOT NULL "
                                 "AND instruction NOT LIKE '[Scheduled%' ORDER BY updated DESC LIMIT 4")
@@ -690,6 +796,10 @@ class Orchestrator:
         pushed_back = False
         nudged = False
         try:
+            direct = DIRECT_RE.search(instruction) if ctx.schedule else None
+            if direct:
+                await self._run_direct(tid, ctx, direct.group(1), direct.group(2))
+                return
             last_fail: dict[str, int] = {}
             limit = user_step_limit(instruction)  # only a limit the user asked for
             step, fails_in_row, repeat_sig, repeat_n = 0, 0, None, 0
@@ -713,7 +823,7 @@ class Orchestrator:
                     app.db.audit(tid, ctx.device, "history_shortened", None, {"messages": len(messages)})
                 app.thinking[tid] = time.time()
                 try:
-                    msg = await app.deepseek.chat(messages, reg.specs())
+                    msg = await self._chat(tid, ctx, messages, reg.specs(app))
                 finally:
                     started = app.thinking.pop(tid, None)
                 calls = msg.get("tool_calls") or []
@@ -745,6 +855,8 @@ class Orchestrator:
                     else:
                         app.db.exec("UPDATE tasks SET state='Completed',result=?,updated=? WHERE id=?", (final, time.time(), tid))
                         app.db.audit(tid, ctx.device, "task_completed", None, {"result": final[:500]})
+                        if lessons and not ctx.schedule:   # worked despite a failure? remember how
+                            asyncio.get_running_loop().create_task(lessons.learn(tid, instruction))
                     return
                 messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
                 app.set_task_state(tid, "Running")
@@ -793,6 +905,12 @@ class Orchestrator:
         finally:
             self.running.pop(tid, None)
             app.executor.release_screen(ctx)   # the screen is free for the next task
+            self._keep_awake()
+            if ctx.schedule and getattr(app, "telegram", None):   # a scheduled run nobody watched did not do its job: say so
+                row = app.db.one("SELECT state,result,error FROM tasks WHERE id=?", (tid,))
+                if row and row["state"] in ("Failed", "Incomplete"):
+                    asyncio.get_running_loop().create_task(app.telegram.alert(
+                        f"⚠ Scheduled '{ctx.schedule.get('title')}' was not completed.\n{(row['result'] or row['error'] or '')[:600]}"))
             app.indicator.hide()
             if tk:
                 tk.disarm()

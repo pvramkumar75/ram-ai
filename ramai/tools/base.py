@@ -26,6 +26,7 @@ class Tool:
     preview: Callable[..., Any] | None = None  # async (args, ctx) -> {"text": str, "digest": str|None}
     check: Callable[..., Any] | None = None  # (args, ctx) raises PolicyError before any approval prompt
     reversible: bool = True
+    available: Callable[[Any], bool] | None = None  # (app) -> False hides the tool from the model (e.g. feature switched off)
 
     def risk_for(self, args: BaseModel) -> Risk:
         return self.risk(args) if callable(self.risk) else self.risk
@@ -51,5 +52,5 @@ class Registry:
     def names(self) -> list[str]:
         return sorted(self._tools)
 
-    def specs(self) -> list[dict]:
-        return [t.spec() for t in self._tools.values()]
+    def specs(self, app=None) -> list[dict]:
+        return [t.spec() for t in self._tools.values() if app is None or t.available is None or t.available(app)]

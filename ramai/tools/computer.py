@@ -433,7 +433,8 @@ def t_ui_click(a: UiClickArgs, ctx):
 def register(reg: Registry) -> None:
     R = Risk
     reg.register(Tool("screenshot", "Capture the screen. Required before coordinate-based actions.", ScreenshotArgs, t_screenshot, R.READ, 20))
-    reg.register(Tool("describe_screen", "Ask the vision provider to describe the current screen (sends a screenshot to the configured vision provider).", DescribeArgs, t_describe, R.READ, 100, untrusted=True))
+    reg.register(Tool("describe_screen", "Ask the vision provider to describe the current screen (sends a screenshot to the configured vision provider).", DescribeArgs, t_describe, R.READ, 100, untrusted=True,
+                      available=lambda app: app.vision.ready()[0]))   # hidden while the vision provider is switched off
     reg.register(Tool("screen_info", "List monitors and their sizes.", NoArgs, t_screen_info, R.READ, 10))
     reg.register(Tool("list_windows", "List visible window titles and the foreground window.", NoArgs, t_windows, R.READ, 10, untrusted=True))
     reg.register(Tool("mouse_move", "Move the pointer to screenshot coordinates.", MoveArgs, t_move, R.LOW, 15, control=True))

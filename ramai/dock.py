@@ -68,6 +68,8 @@ class Dock:
         self._stop = threading.Event()
         self._thread = None
         self._lock = threading.Lock()
+        self.full: set[int] = set()        # work windows that need the whole screen: never squeezed to the left
+        self.minimized: list[int] = []     # windows moved out of the way; restored when the last task ends
 
     def enabled(self) -> bool:
         try:
@@ -104,10 +106,47 @@ class Dock:
             self._thread = threading.Thread(target=self._keep_left, name="ramai-dock", daemon=True)
             self._thread.start()
 
+    # ------------------------------------------------------------ full view for apps that need the whole window
+    def make_room(self, h: int) -> None:
+        """The agent is about to read and click `h` (e.g. WhatsApp): give it the full screen. The docked RAM AI panel and
+        anything else covering it are minimised, and the dock leaves this window alone from now on."""
+        from . import view
+
+        self.full.add(h)                   # first: the dock thread must not squeeze it while we maximise
+        if self.ramai and u32.IsWindow(self.ramai) and not u32.IsIconic(self.ramai):
+            u32.SetWindowPos(self.ramai, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+            u32.ShowWindow(self.ramai, view.SW_SHOWMINNOACTIVE)
+        if not u32.IsZoomed(h):
+            u32.ShowWindow(h, SW_MAXIMIZE)
+        for w in view.clear_view(h):
+            if w != self.ramai and w not in self.minimized:
+                self.minimized.append(w)
+
+    def reveal(self) -> None:
+        """Bring the docked RAM AI panel back (an approval or question is waiting for the user)."""
+        from . import uia
+
+        for w in list(self.minimized):     # RAM AI window that was merely covering the work (not docked)
+            if u32.IsWindow(w) and uia.is_ramai_window(w):
+                u32.ShowWindow(w, SW_RESTORE)
+                self.minimized.remove(w)
+        h = self.ramai
+        if h and u32.IsWindow(h) and u32.IsIconic(h):
+            u32.ShowWindow(h, SW_RESTORE)
+            al, at, ar, ab = self.area
+            u32.SetWindowPos(h, HWND_TOPMOST, self.dock_left, at, ar - self.dock_left, ab - at, SWP_NOACTIVATE | SWP_SHOWWINDOW)
+
     def stop(self) -> None:
         with self._lock:
             self.users = max(0, self.users - 1)
-            if self.users or not self.ramai:
+            if self.users:
+                return
+            from . import view
+
+            view.restore(self.minimized)
+            self.minimized.clear()
+            self.full.clear()
+            if not self.ramai:
                 return
             self._stop.set()
             h, (rect, was_max) = self.ramai, self.saved
@@ -115,6 +154,8 @@ class Dock:
             try:
                 if u32.IsWindow(h):
                     l, t, r, b = rect
+                    if u32.IsIconic(h):
+                        u32.ShowWindow(h, SW_RESTORE)
                     u32.SetWindowPos(h, HWND_NOTOPMOST, l, t, r - l, b - t, SWP_NOACTIVATE)
                     if was_max:
                         u32.ShowWindow(h, SW_MAXIMIZE)
@@ -136,7 +177,7 @@ class Dock:
         return uia.classname(h) not in ("Shell_TrayWnd", "Progman", "WorkerW", "Windows.UI.Core.CoreWindow")
 
     def fit(self, h) -> bool:
-        if not self.ramai or not self._is_work_window(h):
+        if not self.ramai or h in self.full or not self._is_work_window(h):
             return False
         p = plan(_rect(h), self.area, self.dock_left, bool(u32.IsZoomed(h)))
         if not p:

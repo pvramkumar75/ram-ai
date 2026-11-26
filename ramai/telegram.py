@@ -114,6 +114,17 @@ class Telegram:
             mid = (await self._call("sendMessage", p))["message_id"]
         return mid
 
+    async def alert(self, text: str) -> bool:
+        """A short notice to the paired phone (PC locked, schedule failed, update available). Never raises."""
+        chat = int(self.cfg().get("chat_id") or 0)
+        if not chat or not self.token():
+            return False
+        try:
+            await self.send(chat, text)
+            return True
+        except PolicyError:
+            return False
+
     def audit(self, event: str, data: dict | None = None, task_id: str | None = None) -> None:
         self.app.db.audit(task_id, self.app.device_name, event, None, data or {})
 

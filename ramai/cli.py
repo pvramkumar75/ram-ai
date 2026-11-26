@@ -236,6 +236,8 @@ def cmd_status(args) -> int:
     say(f"Folders it may read: {len(se.get('roots', []))} · web: {'on' if se.get('web_access', True) else 'off'} · tools: {len(s['tools'])}")
     act = [t for t in api(h, "GET", "/tasks")[:10] if t["state"] not in ("Completed", "Failed", "Cancelled", "Incomplete")]
     say(f"Running tasks: {len(act)}" + "".join(f"\n  - {t['id']} {t['state']}: {t['instruction'][:70]}" for t in act))
+    if s.get("update"):
+        say(f"A newer version ({s['update']['version']}) is available.  Run:  ramai update", "y")
     return 0
 
 

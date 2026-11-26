@@ -37,6 +37,7 @@ def create_api(app: App, token: str | None = None, port: int = 8765) -> FastAPI:
         app.orchestrator.recover()
         app.scheduler.start()
         app.telegram.start()
+        app.updates.start()
         app.db.purge_older_than(app.settings.get("retention_days", 90))
 
     @api.middleware("http")
@@ -79,7 +80,7 @@ def create_api(app: App, token: str | None = None, port: int = 8765) -> FastAPI:
 
     @api.get("/api/status")
     async def status():
-        return {"version": VERSION, "configured": app.configured(), "device": app.device_name,
+        return {"version": VERSION, "update": app.updates.available, "configured": app.configured(), "device": app.device_name,
                 "control_active": app.indicator.visible, "settings": public_settings(),
                 "usage": app.deepseek.usage, "llm_provider": app.settings.get("llm_provider"),
                 "llm": {"provider": app.deepseek.provider(), "label": app.deepseek.label(), "model": app.deepseek.model()}, "outlook": {"account": app.outlook.account() if app.settings.get("ms_client_id") else None,
@@ -593,6 +594,28 @@ def create_api(app: App, token: str | None = None, port: int = 8765) -> FastAPI:
         r = app.settings.get("remote")
         r["enabled"] = False
         app.settings.set("remote", r)
+        return {"ok": True}
+
+    # ---------------------------------------------------------------- updates & learning
+    @api.post("/api/update/check")
+    async def update_check():
+        return {"current": VERSION, "available": await app.updates.check()}
+
+    @api.post("/api/update/run")
+    async def update_run():
+        if not app.updates.available:
+            raise HTTPException(409, "RAM AI is up to date")
+        app.db.audit(None, app.device_name, "update_started", None, {"to": app.updates.available["version"]})
+        app.updates.run_update()
+        return {"started": True}
+
+    @api.get("/api/lessons")
+    async def lessons_list():
+        return app.lessons.list()
+
+    @api.delete("/api/lessons/{lid}")
+    async def lessons_delete(lid: int):
+        app.lessons.delete(lid)
         return {"ok": True}
 
     # ---------------------------------------------------------------- phone (Telegram)

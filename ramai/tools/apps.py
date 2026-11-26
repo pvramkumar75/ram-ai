@@ -158,7 +158,24 @@ def t_focus(a: FocusArgs, ctx):
     if not h:
         raise PolicyError(f"No visible window containing '{a.title_contains}'")
     uia.focus_window(h)
+    _unblock(h, ctx)
     return {"focused": dict(uia.windows()).get(h)}
+
+
+def _unblock(h, ctx) -> None:
+    """Anything still lying on top of the window the agent needs is minimised (and brought back when the task ends).
+    The docked RAM AI panel stays: the dock moves the work window beside it instead."""
+    try:
+        from .. import view
+
+        dock = getattr(ctx.app, "dock", None)
+        if dock:
+            dock.fit(h)
+        moved = view.clear_view(h, keep={dock.ramai} if dock and dock.ramai else set())
+        if dock:
+            dock.minimized.extend(w for w in moved if w not in dock.minimized)
+    except Exception:
+        pass
 
 
 def _fg_root(ctx):

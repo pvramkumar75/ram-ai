@@ -296,6 +296,80 @@ def classify_messages(lines, shot, limit: int = 15) -> list[dict]:
     return out[-limit:]
 
 
+RECOVERABLE = re.compile(r"chat list not visible|cannot confirm|brought to the front|did not finish loading|message box|"
+                         r"no whatsapp chat matches|window not found", re.I)
+STAMP = re.compile(r"\d{1,2}\s?[-/.]\s?\d{1,2}\s?[-/.]\s?\d{2,4}\s+\d{1,2}\s?:\s?\d{2}(?:\s?:\s?\d{2})?(?:\s?[AP]\.?M\.?)?", re.I)
+
+
+DATE_ONLY = re.compile(r"\d{1,2}\s?[-/.]\s?\d{1,2}\s?[-/.]\s?\d{2,4}")
+
+
+def reread_stamp(shot, ln) -> str | None:
+    """Windows OCR sometimes drops the clock time of a list's timestamp ('26-11-26 PM'); the same pixels stretched wider
+    read completely. Several stretches are tried and the reading they agree on is used."""
+    if not shot:
+        return None
+    from PIL import Image, ImageOps
+
+    from .. import ocr
+
+    img, rc = shot
+    x0, y0 = ln.x - rc[0] - 6, ln.y - rc[1] - 6
+    strip = img.crop((max(0, x0), max(0, y0), min(img.width, x0 + 330), min(img.height, y0 + ln.h + 14))).convert("RGB")
+    if strip.width < 20 or strip.height < 8:
+        return None
+    back = strip.getpixel((strip.width - 1, strip.height - 1))
+    seen: list[str] = []
+    for fx, fy in ((4, 3), (3, 2), (5, 3), (4, 2)):
+        big = ImageOps.expand(strip.resize((strip.width * fx, strip.height * fy), Image.LANCZOS), 40, fill=back)
+        m = STAMP.search(" ".join(x.text for x in ocr.read_image(big)))
+        if m:
+            value = re.sub(r"\s+", " ", m.group(0)).strip()
+            if value in seen:
+                return value
+            seen.append(value)
+    return seen[0] if len(seen) == 1 else None     # two different readings: do not guess
+
+
+def complete_stamp(found: dict, lines, shot, marker: str) -> dict:
+    """Fill in a list's timestamp when the ordinary reading lost its time part."""
+    if not found.get("found") or found.get("stamp"):
+        return found
+    mk = _squash(marker)
+    at = next((i for i in range(len(lines) - 1, -1, -1) if mk in _squash(lines[i].text)), None)
+    if at is None:
+        return found
+    for ln in reversed(lines[max(0, at - 5): at]):
+        if DATE_ONLY.search(ln.text):
+            return {**found, "stamp": reread_stamp(shot, ln)}
+    return found
+
+
+def truncated(name: str) -> bool:
+    return (name or "").rstrip().endswith(("...", "…"))
+
+
+def _squash(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def extract_block(messages: list[dict], marker: str, line_start: str) -> dict:
+    """In the NEWEST price list (the last line containing `marker`): the line starting with `line_start`
+    ('Copper 11918 (-29)') and the list's timestamp. Never falls back to an older list."""
+    lines = [x.strip() for m in messages if m.get("from") != "system" for x in (m.get("text") or "").split("\n") if x.strip()]
+    mk = _squash(marker)
+    at = next((i for i in range(len(lines) - 1, -1, -1) if mk in _squash(lines[i])), None)
+    if at is None:
+        return {"found": False, "seen_marker": False, "reason": f"no message containing '{marker}' is visible"}
+    pat = re.compile(rf"^\W*{re.escape(line_start)}\b\s*[:\-]?\s*(\d[\d.,]*)\s*\(\s*([+\-−–]?\s?\d[\d.,]*)\s*\)", re.I)
+    val = next((m for m in (pat.match(x) for x in lines[at + 1: at + 15]) if m), None)
+    if not val:
+        return {"found": False, "seen_marker": True, "reason": f"the newest '{marker}' message has no readable '{line_start}' line"}
+    stamp = next((m.group(0) for m in (STAMP.search(x) for x in reversed(lines[max(0, at - 6): at + 1])) if m), None)
+    change = val.group(2).replace(" ", "").replace("−", "-").replace("–", "-")
+    return {"found": True, "seen_marker": True, "line": f"{line_start} {val.group(1)} ({change})", "stamp": stamp}
+
+
 # ================================================================== desktop backend (OCR + keyboard)
 class Desktop:
     def __init__(self, app):
@@ -303,6 +377,37 @@ class Desktop:
         self.h = None
 
     # ---------------- window
+    def full_view(self):
+        """WhatsApp maximised, nothing on top of it, and no longer moving - the only layout that is read and clicked."""
+        from .. import view
+
+        dock = getattr(self.app, "dock", None)
+        try:
+            if dock:
+                dock.make_room(self.h)
+            else:
+                uia.user32.ShowWindow(self.h, view.SW_MAXIMIZE)
+                view.clear_view(self.h)
+            view.wait_stable(self.h)
+        except Exception:
+            uia.user32.ShowWindow(self.h, 3)
+
+    def heal(self):
+        """Put WhatsApp back into a clean state after a failed step: close side panels / search, full view again."""
+        import pyautogui
+
+        self.h = find_wa_window() or self.h
+        if not self.h:
+            return
+        self.full_view()
+        self.fg_guard()
+        pyautogui.press("escape")
+        time.sleep(0.2)
+        pyautogui.press("escape")
+        time.sleep(0.3)
+        self.reset_search()
+        _split_cache.clear()
+
     def fg_guard(self):
         if not self.h or not uia.user32.IsWindow(self.h):
             raise PolicyError("WhatsApp window not found")
@@ -406,14 +511,83 @@ class Desktop:
         L, T, r, b, split = self.geom()
         return self.read_area(split + 5, b - 110, r, b, scale=2.0)
 
-    def conversation_shot(self):
+    def conversation_shot(self, scale: float = 1.5):
         """(lines, shot): the visible conversation as OCR lines, plus the window picture they were read from."""
         L, T, r, b, split = self.geom()
         shot = self.window_image()
-        return sorted(self.read_area(split + 5, T + 120, r, b - 90, scale=1.5, shot=shot), key=lambda x: x.y), shot
+        return sorted(self.read_area(split + 5, T + 120, r, b - 90, scale=scale, shot=shot), key=lambda x: x.y), shot
+
+    def wheel(self, notches: int):
+        """Scroll the open conversation (negative = towards the newest message)."""
+        import pyautogui
+
+        L, T, r, b, split = self.geom()
+        self.fg_guard()
+        pyautogui.moveTo((split + r) // 2, (T + b) // 2)
+        pyautogui.scroll(notches * 120)
+        time.sleep(0.35)
 
     def ocr_conversation(self):
         return self.conversation_shot()[0]
+
+    def scroll_to_newest(self, ctx) -> None:
+        """To the very bottom of the open chat: scroll down until the text on screen stops changing."""
+        before = None
+        for _ in range(10):
+            if ctx.stopped():
+                raise PolicyError("Stopped by user")
+            self.wheel(-25)
+            now = [x.text for x in self.ocr_conversation()]
+            if now == before:
+                return
+            before = now
+
+    def extract(self, source: str, marker: str, line_start: str, ctx) -> dict:
+        """Open `source`, go to the newest message, and read the newest `marker` list - scrolling up only as far as needed.
+        The value is accepted only when two separate readings agree, and an OLDER list is never accepted in place of the
+        newest one that was seen."""
+        title = self.open_chat(source, ctx)
+        self.scroll_to_newest(ctx)
+        found = {"found": False, "reason": "nothing read"}
+        newest, cut_off = None, 0
+        for _step in range(20):
+            if ctx.stopped():
+                raise PolicyError("Stopped by user")
+            lines, shot = self.conversation_shot()
+            found = extract_block(classify_messages(lines, shot, 200), marker, line_start)
+            found = complete_stamp(found, lines, shot, marker)
+            if found["found"]:
+                if newest and found["line"] != newest:
+                    found = {"found": False, "reason": f"the timestamp of the newest list ('{newest}') could not be read"}
+                    break
+                newest = found["line"]
+                lines2, shot2 = self.conversation_shot(scale=2.2)
+                again = complete_stamp(extract_block(classify_messages(lines2, shot2, 200), marker, line_start), lines2, shot2, marker)
+                if again.get("line") == found["line"] and found.get("stamp") and again.get("stamp") in (None, found["stamp"]):
+                    return {**found, "chat": title}
+                cut_off += 1
+                if cut_off > 4:
+                    found = {"found": False, "reason": f"could not read '{newest}' and its timestamp the same way twice"}
+                    break
+                self.wheel(1)    # shift the text a little and read again
+                continue
+            more = [x for x in lines if "read more" in x.text.lower()]
+            if found.get("seen_marker") and more:
+                import pyautogui
+
+                self.fg_guard()
+                pyautogui.click(more[-1].cx, more[-1].cy)
+                time.sleep(0.5)
+                continue
+            if found.get("seen_marker"):
+                cut_off += 1
+                if cut_off > 4:
+                    break
+                self.wheel(-2)   # the list is cut off at the bottom edge: nudge it into view
+            else:
+                self.wheel(3)    # further back in the chat, in steps small enough never to jump over a list
+        return {"seen_marker": found.get("seen_marker"), "found": False, "chat": title,
+                "reason": found.get("reason") or f"the newest list could not be read completely"}
 
     def ensure(self):
         import subprocess
@@ -428,8 +602,9 @@ class Desktop:
         if not h:
             raise PolicyError("Could not open the WhatsApp desktop app window")
         self.h = h
-        uia.user32.ShowWindow(h, 3)  # maximise: stable layout
+        self.full_view()
         self.fg_guard()
+        self.full_view()  # again once it is in front: anything still on top of it is now moved away
         end = time.time() + 30
         while time.time() < end:
             lines = self.ocr_left()
@@ -506,7 +681,8 @@ class Desktop:
                 break
         try:
             for r in rows:
-                self.app.people.note(wa_title=r["title"], source="whatsapp")
+                if not truncated(r["title"]):   # 'Daily Price Upd...' is not a name: saving it poisons later searches
+                    self.app.people.note(wa_title=r["title"], source="whatsapp")
         except Exception:
             pass
         return rows
@@ -550,10 +726,10 @@ class Desktop:
         ppl = self.app.people
         q = clean_query(query)
         al = ppl.db.one("SELECT a.key, p.wa_title FROM aliases a JOIN people p ON p.key=a.key WHERE a.alias=? AND a.channel='whatsapp'", (q,))
-        tries = ([al["wa_title"]] if al and al["wa_title"] else []) + [query]
+        tries = ([al["wa_title"]] if al and al["wa_title"] and not truncated(al["wa_title"]) else []) + [query]
         for c in ppl.candidates(query, "whatsapp") + ppl.candidates(query, "mail"):
             nm = c.get("wa_title") or c.get("name")
-            if nm and c["score"] >= 0.8 and pnorm(nm) not in [pnorm(t) for t in tries]:
+            if nm and not truncated(nm) and c["score"] >= 0.8 and pnorm(nm) not in [pnorm(t) for t in tries]:
                 tries.append(nm)
         rows, used = [], []
         for t in tries[:4]:
@@ -774,6 +950,19 @@ class WhatsApp:
             except Exception:
                 pass
 
+    def healed(self, fn, ctx):
+        """Run a find / read / prepare step (never a send). If it fails for a window, focus or layout reason, repair the
+        window and try once more."""
+        try:
+            return fn()
+        except PolicyError as e:
+            if ctx.stopped() or not RECOVERABLE.search(str(e)):
+                raise
+            ctx.app.db.audit(ctx.task_id, ctx.device, "thought", None,
+                             {"text": "WhatsApp was not in a readable state - fixing the window and trying once more."})
+            self.desktop.heal()
+            return fn()
+
     def backend(self) -> str:
         pref = self.app.settings.get("whatsapp_backend", "auto")
         if pref in ("desktop", "web"):
@@ -835,7 +1024,7 @@ async def t_find(a: FindArgs, ctx):
                 ranked, used = wa.desktop.ranked_matches(a.query, ctx)
                 wa.desktop.reset_search()
                 return ranked, used
-            ranked, used = await asyncio.to_thread(run)
+            ranked, used = await asyncio.to_thread(wa.healed, run, ctx)
             from ..people import explain
             return {"backend": "desktop", "candidates": describe(ranked), "picked": ranked[0]["title"] if ranked else None,
                     "why": explain(a.query, ranked, lambda c: c["title"]) if ranked else f"no chat found (searched {used})",
@@ -851,7 +1040,7 @@ async def t_read(a: ReadArgs, ctx):
     wa = ctx.app.whatsapp
     async with wa.lock:
         if wa.backend() == "desktop":
-            return await asyncio.to_thread(wa.desktop.read_chat, a.contact, a.max_messages, ctx, a.choice)
+            return await asyncio.to_thread(wa.healed, lambda: wa.desktop.read_chat(a.contact, a.max_messages, ctx, a.choice), ctx)
         p, titles = await wa.web.titles(a.contact)
         chosen, c2 = choose(a.contact, titles)
         if a.choice:
@@ -875,7 +1064,7 @@ async def t_prepare(a: MsgArgs, ctx):
                 title = wa.desktop.open_chat(a.contact, ctx, a.choice)
                 wa.desktop.compose(a.text, ctx)
                 return title
-            title = await asyncio.to_thread(run)
+            title = await asyncio.to_thread(wa.healed, run, ctx)
             wa.prepared = {"contact": a.contact, "text": a.text, "choice": a.choice, "chat": title, "backend": "desktop",
                            "why": getattr(wa.desktop, "pick_note", "")}
         else:
@@ -961,6 +1150,39 @@ async def t_send(a: MsgArgs, ctx):
         return {"sent": "uncertain", "warning": "Could not verify. Do NOT resend; ask the user to check the chat."}
 
 
+class ExtractArgs(Args):
+    source: str = Field(max_length=120, description="Chat that receives the lists, e.g. a broadcast or group name")
+    marker: str = Field(min_length=3, max_length=80, description="Text that identifies the list, e.g. 'LME (Rates In $/MT)'")
+    line_start: str = Field(min_length=2, max_length=40, description="First word of the wanted line, e.g. 'Copper'")
+    contact: str = Field(max_length=120, description="Chat to send the line and its timestamp to")
+    include_time: bool = True
+
+
+async def extract_preview(a: ExtractArgs, ctx):
+    wa = ctx.app.whatsapp
+    if wa.backend() != "desktop":
+        raise PolicyError("This routine needs the WhatsApp desktop app")
+    async with wa.lock:
+        info = await asyncio.to_thread(wa.healed, lambda: wa.desktop.extract(a.source, a.marker, a.line_start, ctx), ctx)
+    if not info.get("found"):
+        raise PolicyError(f"Nothing sent: {info.get('reason')} in '{info.get('chat', a.source)}'.")
+    if a.include_time and not info.get("stamp"):
+        raise PolicyError(f"Nothing sent: the timestamp of '{info['line']}' could not be read.")
+    text = info["line"] + (("\n" + info["stamp"]) if a.include_time else "")
+    msg = MsgArgs(contact=a.contact, text=text)
+    await t_prepare(msg, ctx)
+    ctx.scratch["extract"] = msg
+    pv = await send_preview(msg, ctx)
+    return {"text": pv["text"] + f"\n(read from the chat '{info['chat']}')", "digest": pv["digest"]}
+
+
+async def t_send_extract(a: ExtractArgs, ctx):
+    msg = ctx.scratch.pop("extract", None)
+    if msg is None:
+        raise PolicyError("Nothing was prepared; nothing sent.")
+    return {**await t_send(msg, ctx), "text": msg.text}
+
+
 async def quick_preview(a: MsgArgs, ctx):
     await t_prepare(a, ctx)  # opens the chat, verifies the header, types and verifies the text (nothing sent)
     return await send_preview(a, ctx)
@@ -969,6 +1191,7 @@ async def quick_preview(a: MsgArgs, ctx):
 def register(reg: Registry) -> None:
     R = Risk
     reg.register(Tool("whatsapp_send_message", "FASTEST way to send a WhatsApp message (also called a message/msg) in ONE call. contact may be a NAME or SHORT FORM (KVR, Suresh, Srini): the best-matching chat is picked (if several match equally, the one you interact with most) and shown on the approval card. Finds and verifies the chat, types the text, gets approval, sends. Use choice=<number> only if the user wants a different match.", MsgArgs, t_send, R.HIGH, 120, preview=quick_preview, reversible=False))
+    reg.register(Tool("whatsapp_send_extract", "Reliable ONE-call routine for relaying a price list: in chat `source` take the newest message containing `marker`, copy its line starting `line_start` plus its timestamp, and send those two lines to `contact`. ALWAYS use this for 'copper rate' style requests instead of reading and scrolling yourself.", ExtractArgs, t_send_extract, R.HIGH, 120, preview=extract_preview, reversible=False))
     reg.register(Tool("whatsapp_open", "Open WhatsApp (desktop app if installed, else web) and report readiness.", NoArgs, t_open, R.LOW, 60))
     reg.register(Tool("whatsapp_find_chat", "Search WhatsApp by name or short form; lists every matching chat best first (identical names listed separately) and which one would be picked.", FindArgs, t_find, R.READ, 60, untrusted=True))
     reg.register(Tool("whatsapp_read_chat", "Read the visible latest messages of a chat found by name.", ReadArgs, t_read, R.READ, 60, untrusted=True))

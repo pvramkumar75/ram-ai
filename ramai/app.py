@@ -172,6 +172,11 @@ class App:
         from .telegram import Telegram
 
         self.telegram = Telegram(self)
+        from .learn import Lessons
+        from .updates import Updates
+
+        self.lessons = Lessons(self)
+        self.updates = Updates(self)
         self.policy.settings.get("output_dir") and self._ensure_output()
 
     def _ensure_output(self):

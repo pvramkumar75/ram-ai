@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "RAM AI"
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 
 def data_dir() -> Path:
@@ -140,6 +140,7 @@ DEFAULTS: dict[str, Any] = {
     "user_name": "",
     "voice_lang": "en-IN",       # speech language for the 🎤 button (en-IN, en-US, hi-IN, te-IN, ta-IN, ...)
     "voice_autosend": False,     # send the task as soon as you stop speaking
+    "update_check": True,        # tell me when a newer RAM AI release exists
     "dock_while_working": True,  # while a task runs: RAM AI on the right edge (on top), the apps it works in on the left
     "device_id": "",
     "setup_done": False,
